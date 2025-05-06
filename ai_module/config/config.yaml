@@ -1,0 +1,10 @@
+# config/config.yaml
+input_dim: 12000
+latent_dim: 64
+use_sigmoid: true
+batch_size: 32
+num_epochs: 50
+learning_rate: 0.001
+
+signal_dir: ai_module/data/processed/signals/
+model_path: ai_module/models/autoencoder.pt
