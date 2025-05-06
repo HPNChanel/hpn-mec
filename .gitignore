@@ -1,0 +1,26 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Environment
+.env
+.env.*
+
+# System
+.DS_Store
+Thumbs.db
+
+# Large outputs
+*.pt
+*.npy
+*.pkl
+*.csv
+*.log
+*.png
+
+# Generated folders
+ai_module/models/
+ai_module/data/processed/
+ai_module/reports/
+ai_module/plots/
