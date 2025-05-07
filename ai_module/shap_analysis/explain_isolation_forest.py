@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SHAP Analysis for Isolation Forest Model
+SHAP Explanation for Isolation Forest Anomaly Detection
 
 This script uses SHAP (SHapley Additive exPlanations) to explain the predictions
 of the trained Isolation Forest model for ECG signal anomaly detection.
@@ -11,14 +11,16 @@ Created: May 2025
 """
 
 import os
+import sys
 import logging
+import warnings
 import numpy as np
 import pandas as pd
 import joblib
 import matplotlib.pyplot as plt
 from pathlib import Path
-import warnings
 import shap
+import traceback
 
 # Configure logging
 logging.basicConfig(
@@ -27,14 +29,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Constants and paths
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-LATENTS_DIR = PROJECT_ROOT / "data/processed/latents"
-MODELS_DIR = PROJECT_ROOT / "models"
-REPORTS_DIR = PROJECT_ROOT / "reports"
-PLOTS_DIR = REPORTS_DIR / "plots"
+# Ensure proper imports by determining the project root
+# Find the ai_module directory in the path
+file_path = Path(__file__).resolve()
+module_dir = None
+for parent in file_path.parents:
+    if parent.name == "ai_module":
+        module_dir = parent
+        break
+    
+if module_dir is None:
+    raise ImportError("Cannot find ai_module directory in path hierarchy")
 
-# Ensure output directories exist
+# Add project root to path for reliable imports
+sys.path.insert(0, str(module_dir))
+
+# Now use absolute imports
+from utils.load_latents import load_latents
+
+# Constants and paths
+MODELS_DIR = module_dir / "models"
+REPORTS_DIR = module_dir / "reports"
+PLOTS_DIR = REPORTS_DIR / "plots"
+MODEL_PATH = MODELS_DIR / "isolation_forest.pkl"
+ANOMALY_SCORES_PATH = REPORTS_DIR / "anomaly_scores.csv"
+
+# Ensure output directory exists
 PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -46,82 +66,109 @@ def load_model():
         model: Trained Isolation Forest model
     """
     try:
-        # Define model path
-        model_path = MODELS_DIR / "isolation_forest.pkl"
-        
         # Check if model exists
-        if not model_path.exists():
-            logger.error(f"Model file not found: {model_path}")
+        if not MODEL_PATH.exists():
+            logger.error(f"Model file not found: {MODEL_PATH}")
             return None
         
         # Load model
-        model = joblib.load(model_path)
+        model = joblib.load(MODEL_PATH)
         
-        logger.info(f"Model loaded successfully from {model_path}")
+        logger.info(f"Model loaded successfully from {MODEL_PATH}")
         
         return model
         
     except Exception as e:
         logger.error(f"Error loading model: {e}")
+        logger.error(traceback.format_exc())
         return None
 
 
-def load_latent_vectors(max_samples=None):
+def load_anomaly_scores():
     """
-    Load all latent vector files from the latents directory.
+    Load anomaly scores from CSV file.
     
-    Args:
-        max_samples (int, optional): Maximum number of samples to load
-        
     Returns:
-        tuple: (feature_matrix, file_names)
+        pd.DataFrame: DataFrame with anomaly scores
     """
     try:
-        # Get all .npy files in the latents directory
-        latent_files = list(LATENTS_DIR.glob("*.npy"))
+        # Check if file exists
+        if not ANOMALY_SCORES_PATH.exists():
+            logger.error(f"Anomaly scores file not found: {ANOMALY_SCORES_PATH}")
+            return None
         
-        if not latent_files:
-            logger.error(f"No latent vector files found in {LATENTS_DIR}")
-            return None, None
+        # Load CSV
+        df = pd.read_csv(ANOMALY_SCORES_PATH)
         
-        # Limit number of files if specified
-        if max_samples is not None and max_samples < len(latent_files):
-            latent_files = latent_files[:max_samples]
-            logger.info(f"Limited to {max_samples} latent vector files")
-        else:
-            logger.info(f"Found {len(latent_files)} latent vector files")
+        logger.info(f"Loaded anomaly scores for {len(df)} samples")
         
-        # Initialize lists to store data
-        features = []
-        file_names = []
-        
-        # Load each latent vector file
-        for file_path in latent_files:
-            try:
-                # Load latent vector
-                latent = np.load(file_path)
-                
-                # Ensure vector is 1D (flatten if needed)
-                latent = latent.flatten()
-                
-                # Add to lists
-                features.append(latent)
-                file_names.append(file_path.stem)
-                
-            except Exception as e:
-                logger.warning(f"Error loading latent vector {file_path.name}: {e}")
-                continue
-        
-        # Convert list of features to 2D array
-        feature_matrix = np.vstack(features)
-        
-        logger.info(f"Loaded feature matrix with shape: {feature_matrix.shape}")
-        
-        return feature_matrix, file_names
+        return df
         
     except Exception as e:
-        logger.error(f"Error loading latent vectors: {e}")
-        return None, None
+        logger.error(f"Error loading anomaly scores: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+def select_anomalous_samples(df_scores, latents_df, n_samples=50):
+    """
+    Select the top most anomalous samples from the dataset.
+    
+    Args:
+        df_scores (pd.DataFrame): DataFrame with anomaly scores
+        latents_df (pd.DataFrame): DataFrame with latent vectors
+        n_samples (int): Number of samples to select
+        
+    Returns:
+        tuple: (X_anomalous, file_names, df_merged)
+    """
+    try:
+        if df_scores is None or latents_df is None:
+            logger.error("Cannot select samples from None DataFrames")
+            return None, None, None
+        
+        # Filter anomalous samples
+        anomalies = df_scores[df_scores['is_anomaly'] == 1].copy()
+        
+        if len(anomalies) == 0:
+            logger.warning("No anomalous samples found, using top scores instead")
+            # If no anomalies found, take top scores instead
+            anomalies = df_scores.sort_values('anomaly_score', ascending=False).copy()
+        
+        # Sort by anomaly score (descending)
+        anomalies = anomalies.sort_values('anomaly_score', ascending=False)
+        
+        # Limit to n_samples
+        if len(anomalies) > n_samples:
+            logger.info(f"Limiting to top {n_samples} anomalous samples")
+            anomalies = anomalies.head(n_samples)
+        
+        # Merge with latents
+        merged_df = pd.merge(
+            anomalies,
+            latents_df,
+            on='file_name',
+            how='inner',
+            suffixes=('', '_latent')
+        )
+        
+        if len(merged_df) == 0:
+            logger.error("No matching samples found after merging")
+            return None, None, None
+        
+        logger.info(f"Selected {len(merged_df)} anomalous samples for explanation")
+        
+        # Extract feature columns
+        feature_cols = [col for col in merged_df.columns if col.startswith('feature_')]
+        X_anomalous = merged_df[feature_cols].values
+        file_names = merged_df['file_name'].tolist()
+        
+        return X_anomalous, file_names, merged_df
+        
+    except Exception as e:
+        logger.error(f"Error selecting anomalous samples: {e}")
+        logger.error(traceback.format_exc())
+        return None, None, None
 
 
 def create_model_wrapper(model):
@@ -137,111 +184,115 @@ def create_model_wrapper(model):
     try:
         # For Isolation Forest, we typically use negative of decision_function
         # as anomaly score (higher score = more anomalous)
-        def wrapped_model(X):
+        def model_function(X):
+            # Ensure X is a 2D array
+            if len(X.shape) == 1:
+                X = X.reshape(1, -1)
+                
             # Return negative of decision function (higher = more anomalous)
             return -model.decision_function(X)
         
         logger.info("Created model wrapper for SHAP analysis")
         
-        return wrapped_model
+        return model_function
         
     except Exception as e:
         logger.error(f"Error creating model wrapper: {e}")
+        logger.error(traceback.format_exc())
         return None
 
 
-def generate_shap_explanations(model, X, max_samples=100):
+def compute_shap_values(model, X_samples, X_background=None):
     """
-    Generate SHAP values for the model predictions.
+    Compute SHAP values for the model predictions.
     
     Args:
         model: Trained Isolation Forest model
-        X (numpy.ndarray): Feature matrix
-        max_samples (int): Maximum number of samples to explain
+        X_samples (numpy.ndarray): Feature matrix for samples to explain
+        X_background (numpy.ndarray, optional): Background data for SHAP explainer
         
     Returns:
-        shap.Explanation: SHAP explanation object
+        tuple: (shap_values, explainer)
     """
     try:
         # Create model wrapper
         model_func = create_model_wrapper(model)
         if model_func is None:
             logger.error("Model wrapper creation failed")
-            return None
+            return None, None
         
-        # Limit number of samples for SHAP analysis if needed
-        if max_samples and X.shape[0] > max_samples:
-            logger.info(f"Limiting SHAP analysis to {max_samples} samples")
-            X_subset = X[:max_samples]
-        else:
-            X_subset = X
+        # If background data not provided, use subset of samples
+        if X_background is None:
+            logger.info("Using samples subset as background data")
+            # Use at most 100 samples for background
+            n_background = min(100, len(X_samples))
+            idx = np.random.choice(len(X_samples), n_background, replace=False)
+            X_background = X_samples[idx]
         
-        logger.info(f"Generating SHAP explanations for {X_subset.shape[0]} samples")
-        
-        # Create feature names
-        feature_names = [f"feature_{i+1}" for i in range(X.shape[1])]
+        logger.info(f"Initializing SHAP KernelExplainer with {len(X_background)} background samples")
         
         # Suppress warnings during SHAP computation
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             
-            # Initialize SHAP explainer
-            # Use KernelExplainer for model-agnostic explanations
-            # This works with any black-box model
-            explainer = shap.KernelExplainer(model_func, X_subset)
+            # Initialize KernelExplainer
+            explainer = shap.KernelExplainer(model_func, X_background)
+            
+            # Compute SHAP values (limit samples for efficiency if needed)
+            max_explain = min(50, len(X_samples))
+            if len(X_samples) > max_explain:
+                logger.info(f"Computing SHAP values for {max_explain} samples (out of {len(X_samples)})")
+                X_subset = X_samples[:max_explain]
+            else:
+                X_subset = X_samples
             
             # Compute SHAP values
-            shap_values = explainer.shap_values(X_subset)
-            
-            # Create explanation object
-            explanation = shap.Explanation(
-                values=shap_values,
-                data=X_subset,
-                feature_names=feature_names
-            )
+            shap_values = explainer.shap_values(X_subset, nsamples=100)
         
-        logger.info("SHAP explanations generated successfully")
+        logger.info(f"SHAP values computed successfully with shape: {np.array(shap_values).shape}")
         
-        return explanation
+        return shap_values, explainer
         
     except Exception as e:
-        logger.error(f"Error generating SHAP explanations: {e}")
-        return None
+        logger.error(f"Error computing SHAP values: {e}")
+        logger.error(traceback.format_exc())
+        return None, None
 
 
-def plot_shap_summary(shap_explanation, output_dir):
+def plot_shap_summary(shap_values, X, feature_names=None):
     """
-    Create and save SHAP summary plot (beeswarm plot).
+    Create and save SHAP summary plot (beeswarm).
     
     Args:
-        shap_explanation: SHAP explanation object
-        output_dir (Path): Directory to save plot
+        shap_values: SHAP values
+        X (numpy.ndarray): Feature matrix
+        feature_names (list, optional): Names of features
         
     Returns:
-        str: Path to saved plot file
+        str: Path to saved plot
     """
     try:
-        # Create figure for better control
+        # Create figure
         plt.figure(figsize=(12, 8))
         
         # Suppress warnings during plotting
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             
-            # Create summary plot (beeswarm plot)
+            # Create summary plot
             shap.summary_plot(
-                shap_explanation.values,
-                shap_explanation.data,
-                feature_names=shap_explanation.feature_names,
+                shap_values, 
+                X, 
+                feature_names=feature_names,
                 show=False
             )
         
         # Add title
-        plt.title("SHAP Summary Plot for Isolation Forest", fontsize=14)
+        plt.title("SHAP Feature Importance for Isolation Forest Anomaly Detection", fontsize=14)
         plt.tight_layout()
         
         # Save figure
-        output_path = output_dir / "explain_isolation_forest_summary.png"
+        output_path = PLOTS_DIR / "explain_iforest_summary.png"
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -251,40 +302,58 @@ def plot_shap_summary(shap_explanation, output_dir):
         
     except Exception as e:
         logger.error(f"Error plotting SHAP summary: {e}")
+        logger.error(traceback.format_exc())
         return None
 
 
-def plot_shap_bar(shap_explanation, output_dir):
+def plot_shap_bar(shap_values, feature_names=None):
     """
-    Create and save SHAP bar plot of mean absolute values.
+    Create and save SHAP bar plot (mean absolute values).
     
     Args:
-        shap_explanation: SHAP explanation object
-        output_dir (Path): Directory to save plot
+        shap_values: SHAP values
+        feature_names (list, optional): Names of features
         
     Returns:
-        str: Path to saved plot file
+        str: Path to saved plot
     """
     try:
-        # Create figure for better control
-        plt.figure(figsize=(10, 8))
+        # Create figure
+        plt.figure(figsize=(12, 8))
         
-        # Suppress warnings during plotting
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            
-            # Create bar plot of mean absolute SHAP values
-            shap.plots.bar(
-                shap_explanation,
-                show=False
-            )
+        # Calculate mean absolute SHAP values for each feature
+        mean_abs_shap = np.abs(shap_values).mean(0)
         
-        # Add title
-        plt.title("Mean Impact on Model Output (Magnitude)", fontsize=14)
+        # If feature_names not provided, create generic names
+        if feature_names is None:
+            feature_names = [f"Feature {i+1}" for i in range(len(mean_abs_shap))]
+        
+        # Create DataFrame for plotting
+        shap_df = pd.DataFrame({
+            'feature': feature_names,
+            'importance': mean_abs_shap
+        })
+        
+        # Sort by importance
+        shap_df = shap_df.sort_values('importance', ascending=False)
+        
+        # Plot top 20 features
+        top_n = min(20, len(shap_df))
+        plt.barh(
+            y=shap_df['feature'].values[:top_n],
+            width=shap_df['importance'].values[:top_n],
+            color='skyblue'
+        )
+        
+        # Add labels and title
+        plt.xlabel('Mean |SHAP Value|', fontsize=12)
+        plt.ylabel('Feature', fontsize=12)
+        plt.title('Feature Importance (Mean Absolute SHAP Values)', fontsize=14)
+        plt.grid(axis='x', alpha=0.3)
         plt.tight_layout()
         
         # Save figure
-        output_path = output_dir / "explain_isolation_forest_bar.png"
+        output_path = PLOTS_DIR / "explain_iforest_bar.png"
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         
@@ -294,6 +363,7 @@ def plot_shap_bar(shap_explanation, output_dir):
         
     except Exception as e:
         logger.error(f"Error plotting SHAP bar chart: {e}")
+        logger.error(traceback.format_exc())
         return None
 
 
@@ -302,7 +372,10 @@ def main():
     Main function to generate SHAP explanations for Isolation Forest model.
     """
     try:
-        logger.info("Starting SHAP analysis for Isolation Forest")
+        logger.info("Starting SHAP explanation for Isolation Forest")
+        
+        # Set matplotlib style
+        plt.style.use('fivethirtyeight')
         
         # Load model
         model = load_model()
@@ -310,29 +383,50 @@ def main():
             logger.error("Failed to load model, aborting")
             return
         
-        # Load latent vectors (limit to 100 samples for performance)
-        X, file_names = load_latent_vectors(max_samples=100)
-        if X is None:
+        # Load latent vectors
+        latents_df = load_latents()
+        if latents_df is None:
             logger.error("Failed to load latent vectors, aborting")
             return
         
-        # Generate SHAP explanations
-        shap_explanation = generate_shap_explanations(model, X)
-        if shap_explanation is None:
-            logger.error("Failed to generate SHAP explanations, aborting")
+        # Load anomaly scores
+        scores_df = load_anomaly_scores()
+        if scores_df is None:
+            logger.error("Failed to load anomaly scores, aborting")
             return
         
-        # Create and save plots
-        summary_path = plot_shap_summary(shap_explanation, PLOTS_DIR)
-        bar_path = plot_shap_bar(shap_explanation, PLOTS_DIR)
+        # Select anomalous samples
+        X_anomalous, file_names, merged_df = select_anomalous_samples(scores_df, latents_df)
+        if X_anomalous is None:
+            logger.error("Failed to select anomalous samples, aborting")
+            return
         
-        # Log completion
-        logger.info("SHAP analysis for Isolation Forest completed")
-        logger.info(f"Summary plot saved to: {summary_path}")
-        logger.info(f"Bar plot saved to: {bar_path}")
+        # Identify feature columns
+        feature_cols = [col for col in latents_df.columns if col.startswith('feature_')]
+        
+        # Compute SHAP values
+        shap_values, explainer = compute_shap_values(model, X_anomalous)
+        if shap_values is None:
+            logger.error("Failed to compute SHAP values, aborting")
+            return
+        
+        # Plot SHAP summary
+        summary_path = plot_shap_summary(shap_values, X_anomalous, feature_cols)
+        
+        # Plot SHAP bar chart
+        bar_path = plot_shap_bar(shap_values, feature_cols)
+        
+        # Final message
+        if summary_path and bar_path:
+            logger.info("SHAP explanation for Isolation Forest completed successfully")
+            logger.info(f"Summary plot: {summary_path}")
+            logger.info(f"Bar plot: {bar_path}")
+        else:
+            logger.warning("SHAP explanation completed with some errors")
         
     except Exception as e:
-        logger.error(f"Error in SHAP analysis for Isolation Forest: {e}")
+        logger.error(f"Error in SHAP explanation: {e}")
+        logger.error(traceback.format_exc())
 
 
 if __name__ == "__main__":

@@ -1,5 +1,3 @@
-# TODO: Implement this module
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -13,12 +11,14 @@ Created: May 2025
 """
 
 import os
+import sys
 import logging
 import numpy as np
 import pandas as pd
 import joblib
 from pathlib import Path
 from sklearn.ensemble import IsolationForest
+import traceback
 
 # Configure logging
 logging.basicConfig(
@@ -27,107 +27,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Ensure proper imports by determining the project root
+# Find the ai_module directory in the path
+file_path = Path(__file__).resolve()
+module_dir = None
+for parent in file_path.parents:
+    if parent.name == "ai_module":
+        module_dir = parent
+        break
+    
+if module_dir is None:
+    raise ImportError("Cannot find ai_module directory in path hierarchy")
+
+# Add project root to path for reliable imports
+sys.path.insert(0, str(module_dir))
+
+# Now use absolute imports
+from utils.load_latents import load_latents
+
 # Constants and paths
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-LATENTS_DIR = PROJECT_ROOT / "data/processed/latents"
-MODELS_DIR = PROJECT_ROOT / "models"
-REPORTS_DIR = PROJECT_ROOT / "reports"
+MODELS_DIR = module_dir / "models"
+REPORTS_DIR = module_dir / "reports"
 
 # Ensure directories exist
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_latent_vectors():
+def train_isolation_forest(df_train, feature_cols):
     """
-    Load all latent vector files from the latents directory.
-    
-    Returns:
-        tuple: (feature_matrix, file_names)
-    """
-    try:
-        # Get all .npy files in the latents directory
-        latent_files = list(LATENTS_DIR.glob("*.npy"))
-        
-        if not latent_files:
-            logger.error(f"No latent vector files found in {LATENTS_DIR}")
-            return None, None
-        
-        logger.info(f"Found {len(latent_files)} latent vector files")
-        
-        # Initialize lists to store data
-        features = []
-        file_names = []
-        
-        # Load each latent vector file
-        for file_path in latent_files:
-            try:
-                # Load latent vector
-                latent = np.load(file_path)
-                
-                # Ensure vector is 1D (flatten if needed)
-                latent = latent.flatten()
-                
-                # Add to lists
-                features.append(latent)
-                file_names.append(file_path.stem)
-                
-            except Exception as e:
-                logger.warning(f"Error loading latent vector {file_path.name}: {e}")
-                continue
-        
-        # Convert list of features to 2D array
-        feature_matrix = np.vstack(features)
-        
-        logger.info(f"Loaded feature matrix with shape: {feature_matrix.shape}")
-        
-        return feature_matrix, file_names
-        
-    except Exception as e:
-        logger.error(f"Error loading latent vectors: {e}")
-        return None, None
-
-
-def load_reconstruction_errors():
-    """
-    Load reconstruction errors from CSV file.
-    
-    Returns:
-        pd.DataFrame: DataFrame with reconstruction errors
-    """
-    try:
-        # Define path to reconstruction errors CSV
-        recon_errors_path = REPORTS_DIR / "reconstruction_scores.csv"
-        
-        # Check if file exists
-        if not recon_errors_path.exists():
-            logger.warning(f"Reconstruction errors file not found: {recon_errors_path}")
-            return None
-        
-        # Load CSV into DataFrame
-        df = pd.read_csv(recon_errors_path)
-        
-        logger.info(f"Loaded reconstruction errors for {len(df)} samples")
-        
-        return df
-        
-    except Exception as e:
-        logger.error(f"Error loading reconstruction errors: {e}")
-        return None
-
-
-def train_isolation_forest(X):
-    """
-    Train Isolation Forest model on latent vectors.
+    Train Isolation Forest model on the training subset of latent vectors.
     
     Args:
-        X (numpy.ndarray): Feature matrix of latent vectors
+        df_train (pd.DataFrame): DataFrame containing training data
+        feature_cols (list): List of feature column names
         
     Returns:
         sklearn.ensemble.IsolationForest: Trained model
     """
     try:
         logger.info("Training Isolation Forest model")
+        
+        # Extract feature matrix for training
+        X_train = df_train[feature_cols].values
+        
+        logger.info(f"Training with {X_train.shape[0]} samples and {X_train.shape[1]} features")
         
         # Initialize model with specified parameters
         model = IsolationForest(
@@ -138,7 +82,7 @@ def train_isolation_forest(X):
         )
         
         # Train model
-        model.fit(X)
+        model.fit(X_train)
         
         logger.info("Isolation Forest training completed")
         
@@ -146,15 +90,17 @@ def train_isolation_forest(X):
         
     except Exception as e:
         logger.error(f"Error training Isolation Forest model: {e}")
+        logger.error(traceback.format_exc())
         return None
 
 
-def save_model(model):
+def save_model(model, output_path=None):
     """
     Save trained Isolation Forest model to disk.
     
     Args:
         model: Trained Isolation Forest model
+        output_path (Path, optional): Path to save model
         
     Returns:
         bool: True if saving was successful, False otherwise
@@ -164,119 +110,83 @@ def save_model(model):
             logger.error("Cannot save None model")
             return False
         
-        # Define save path
-        model_path = MODELS_DIR / "isolation_forest.pkl"
+        # Use default path if not specified
+        if output_path is None:
+            output_path = MODELS_DIR / "isolation_forest.pkl"
         
         # Save model
-        joblib.dump(model, model_path)
+        joblib.dump(model, output_path)
         
-        logger.info(f"Model saved to {model_path}")
+        logger.info(f"Model saved to {output_path}")
         
         return True
         
     except Exception as e:
         logger.error(f"Error saving model: {e}")
+        logger.error(traceback.format_exc())
         return False
 
 
-def generate_anomaly_scores(model, X, file_names):
+def generate_predictions(model, df, feature_cols):
     """
-    Generate anomaly scores and predictions from the trained model.
+    Generate anomaly scores and predictions for all data.
     
     Args:
         model: Trained Isolation Forest model
-        X (numpy.ndarray): Feature matrix of latent vectors
-        file_names (list): List of file names corresponding to each sample
+        df (pd.DataFrame): DataFrame containing all data
+        feature_cols (list): List of feature column names
         
     Returns:
-        pd.DataFrame: DataFrame with anomaly scores and predictions
+        pd.DataFrame: DataFrame with added anomaly scores and predictions
     """
     try:
-        if model is None or X is None or file_names is None:
-            logger.error("Cannot generate scores with None inputs")
+        if model is None:
+            logger.error("Cannot generate predictions with None model")
             return None
         
-        logger.info("Generating anomaly scores")
+        logger.info(f"Generating predictions for {len(df)} samples")
         
-        # Generate raw anomaly scores (negative of decision function)
+        # Create a copy to avoid modifying the original
+        results_df = df.copy()
+        
+        # Extract feature matrix
+        X = results_df[feature_cols].values
+        
+        # Generate anomaly scores (negative of decision function)
         # Higher score = more anomalous
         anomaly_scores = -model.decision_function(X)
         
-        # Generate binary predictions (1 = anomaly, -1 = normal)
+        # Generate predictions (1 = anomaly, -1 = normal in Isolation Forest)
         predictions = model.predict(X)
         
-        # Convert predictions to 0/1 format (1 = anomaly, 0 = normal)
-        # In Isolation Forest, -1 = anomaly, 1 = normal, so we need to convert
+        # Convert predictions to format where 1 = anomaly, 0 = normal
         is_anomaly = np.where(predictions == -1, 1, 0)
         
-        # Create DataFrame
-        results_df = pd.DataFrame({
-            'file_name': file_names,
-            'anomaly_score': anomaly_scores,
-            'is_anomaly': is_anomaly
-        })
+        # Add results to DataFrame
+        results_df['anomaly_score'] = anomaly_scores
+        results_df['is_anomaly'] = is_anomaly
         
-        logger.info(f"Generated anomaly scores for {len(results_df)} samples")
+        # Calculate basic statistics
+        n_anomalies = np.sum(is_anomaly)
+        anomaly_rate = n_anomalies / len(is_anomaly)
+        
+        logger.info(f"Identified {n_anomalies} anomalies ({anomaly_rate:.2%} of all samples)")
         
         return results_df
         
     except Exception as e:
-        logger.error(f"Error generating anomaly scores: {e}")
+        logger.error(f"Error generating predictions: {e}")
+        logger.error(traceback.format_exc())
         return None
 
 
-def merge_with_reconstruction_errors(anomaly_df, recon_errors_df):
-    """
-    Merge anomaly scores with reconstruction errors.
-    
-    Args:
-        anomaly_df (pd.DataFrame): DataFrame with anomaly scores
-        recon_errors_df (pd.DataFrame): DataFrame with reconstruction errors
-        
-    Returns:
-        pd.DataFrame: Merged DataFrame
-    """
-    try:
-        if anomaly_df is None:
-            logger.error("Cannot merge with None anomaly DataFrame")
-            return None
-        
-        if recon_errors_df is None:
-            logger.warning("No reconstruction errors to merge, returning anomaly scores only")
-            return anomaly_df
-        
-        logger.info("Merging anomaly scores with reconstruction errors")
-        
-        # Prepare reconstruction errors DataFrame
-        # Extract filename without extension from 'filename' column if needed
-        if 'filename' in recon_errors_df.columns:
-            recon_errors_df['file_name'] = recon_errors_df['filename'].apply(
-                lambda x: Path(x).stem
-            )
-        
-        # Merge DataFrames on file_name
-        merged_df = pd.merge(
-            anomaly_df,
-            recon_errors_df[['file_name', 'reconstruction_error']],
-            on='file_name',
-            how='left'
-        )
-        
-        logger.info(f"Merged DataFrame has {len(merged_df)} rows and {merged_df.shape[1]} columns")
-        
-        return merged_df
-        
-    except Exception as e:
-        logger.error(f"Error merging with reconstruction errors: {e}")
-        return anomaly_df
-
-
-def save_results(results_df):
+def save_results(results_df, output_path=None):
     """
     Save results DataFrame to CSV.
     
     Args:
         results_df (pd.DataFrame): DataFrame with results
+        output_path (Path, optional): Path to save results
         
     Returns:
         bool: True if saving was successful, False otherwise
@@ -286,62 +196,100 @@ def save_results(results_df):
             logger.error("Cannot save empty or None results")
             return False
         
-        # Define save path
-        results_path = REPORTS_DIR / "anomaly_scores.csv"
+        # Use default path if not specified
+        if output_path is None:
+            output_path = REPORTS_DIR / "anomaly_scores.csv"
+        
+        # Select columns to save
+        # Start with required columns
+        columns_to_save = ['file_name', 'split', 'anomaly_score', 'is_anomaly']
+        
+        # Add reconstruction_error if it exists
+        if 'reconstruction_error' in results_df.columns:
+            columns_to_save.append('reconstruction_error')
+        
+        # Filter columns
+        output_df = results_df[columns_to_save]
         
         # Save to CSV
-        results_df.to_csv(results_path, index=False)
+        output_df.to_csv(output_path, index=False)
         
-        logger.info(f"Results saved to {results_path}")
+        logger.info(f"Results saved to {output_path}")
         
         return True
         
     except Exception as e:
         logger.error(f"Error saving results: {e}")
+        logger.error(traceback.format_exc())
         return False
 
 
 def main():
     """
-    Main function to load data, train model, and generate results.
+    Main function to load data, train model, generate predictions, and save results.
     """
     try:
         logger.info("Starting Isolation Forest training process")
         
         # Load latent vectors
-        X, file_names = load_latent_vectors()
-        if X is None or file_names is None:
+        df_all = load_latents()
+        if df_all is None or df_all.empty:
             logger.error("Failed to load latent vectors, aborting")
             return
         
-        # Load reconstruction errors
-        recon_errors_df = load_reconstruction_errors()
+        # Identify feature columns
+        feature_cols = [col for col in df_all.columns if col.startswith('feature_')]
+        if not feature_cols:
+            logger.error("No feature columns found, aborting")
+            return
+        
+        logger.info(f"Found {len(feature_cols)} feature columns")
+        
+        # Split into train/test
+        df_train = df_all[df_all['split'] == 'train'].copy()
+        
+        if len(df_train) == 0:
+            logger.error("No training samples found, aborting")
+            return
+        
+        logger.info(f"Using {len(df_train)} samples for training")
         
         # Train Isolation Forest model
-        model = train_isolation_forest(X)
+        model = train_isolation_forest(df_train, feature_cols)
         if model is None:
             logger.error("Failed to train model, aborting")
             return
         
         # Save trained model
-        save_model(model)
+        if not save_model(model):
+            logger.error("Failed to save model, continuing with prediction")
         
-        # Generate anomaly scores
-        results_df = generate_anomaly_scores(model, X, file_names)
+        # Generate predictions for all samples
+        results_df = generate_predictions(model, df_all, feature_cols)
         if results_df is None:
-            logger.error("Failed to generate anomaly scores, aborting")
+            logger.error("Failed to generate predictions, aborting")
             return
         
-        # Merge with reconstruction errors
-        merged_df = merge_with_reconstruction_errors(results_df, recon_errors_df)
-        
         # Save results
-        save_results(merged_df)
+        if not save_results(results_df):
+            logger.error("Failed to save results")
+        
+        # Print summary statistics
+        logger.info("Anomaly detection summary:")
+        train_anomalies = results_df[(results_df['split'] == 'train') & (results_df['is_anomaly'] == 1)]
+        test_anomalies = results_df[(results_df['split'] == 'test') & (results_df['is_anomaly'] == 1)]
+        
+        logger.info(f"Train set: {len(train_anomalies)}/{len(df_train)} samples ({len(train_anomalies)/len(df_train):.2%}) identified as anomalies")
+        
+        test_set = df_all[df_all['split'] == 'test']
+        if len(test_set) > 0:
+            logger.info(f"Test set: {len(test_anomalies)}/{len(test_set)} samples ({len(test_anomalies)/len(test_set):.2%}) identified as anomalies")
         
         logger.info("Isolation Forest training and evaluation completed")
         
     except Exception as e:
         logger.error(f"Error in Isolation Forest training process: {e}")
+        logger.error(traceback.format_exc())
 
 
 if __name__ == "__main__":
