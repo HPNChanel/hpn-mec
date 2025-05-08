@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Isolation Forest Training for ECG Signal Anomaly Detection
+Isolation Forest Training for Anomaly Detection
 
-This script trains an Isolation Forest model on latent vectors derived from an autoencoder
-to detect anomalous ECG signals using an unsupervised approach.
+This script trains an Isolation Forest model on preprocessed latent vectors
+to detect anomalies in health data.
 
 Author: Huỳnh Phúc Nguyên
 Created: May 2025
@@ -13,12 +13,20 @@ Created: May 2025
 import os
 import sys
 import logging
+import argparse
 import numpy as np
-import pandas as pd
 import joblib
-from pathlib import Path
 from sklearn.ensemble import IsolationForest
-import traceback
+from sklearn.model_selection import train_test_split
+from pathlib import Path
+from tqdm import tqdm
+
+# Add parent directory to sys.path if running as script
+if __name__ == "__main__":
+    current_file = Path(__file__).resolve()
+    project_root = current_file.parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
 # Configure logging
 logging.basicConfig(
@@ -27,270 +35,275 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Ensure proper imports by determining the project root
-# Find the ai_module directory in the path
-file_path = Path(__file__).resolve()
-module_dir = None
-for parent in file_path.parents:
-    if parent.name == "ai_module":
-        module_dir = parent
-        break
-    
-if module_dir is None:
-    raise ImportError("Cannot find ai_module directory in path hierarchy")
-
-# Add project root to path for reliable imports
-sys.path.insert(0, str(module_dir))
-
-# Now use absolute imports
-from utils.load_latents import load_latents
-
-# Constants and paths
-MODELS_DIR = module_dir / "models"
-REPORTS_DIR = module_dir / "reports"
-
-# Ensure directories exist
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def train_isolation_forest(df_train, feature_cols):
+def train_isolation_forest(
+    X_train, 
+    n_estimators=100, 
+    contamination=0.1, 
+    random_state=42,
+    verbose=1
+):
     """
-    Train Isolation Forest model on the training subset of latent vectors.
+    Train an Isolation Forest model for anomaly detection.
     
     Args:
-        df_train (pd.DataFrame): DataFrame containing training data
-        feature_cols (list): List of feature column names
+        X_train: Training data (latent vectors)
+        n_estimators: Number of base estimators (trees)
+        contamination: Expected proportion of anomalies
+        random_state: Random seed for reproducibility
+        verbose: Verbosity level
         
     Returns:
-        sklearn.ensemble.IsolationForest: Trained model
+        IsolationForest: Trained model
     """
-    try:
-        logger.info("Training Isolation Forest model")
-        
-        # Extract feature matrix for training
-        X_train = df_train[feature_cols].values
-        
-        logger.info(f"Training with {X_train.shape[0]} samples and {X_train.shape[1]} features")
-        
-        # Initialize model with specified parameters
-        model = IsolationForest(
-            n_estimators=100,
-            random_state=42,
-            contamination='auto',
-            n_jobs=-1  # Use all available CPU cores
-        )
-        
-        # Train model
-        model.fit(X_train)
-        
-        logger.info("Isolation Forest training completed")
-        
-        return model
-        
-    except Exception as e:
-        logger.error(f"Error training Isolation Forest model: {e}")
-        logger.error(traceback.format_exc())
-        return None
+    logger.info(f"Training Isolation Forest with {n_estimators} estimators, "
+                f"contamination={contamination}")
+    
+    # Create and train model
+    model = IsolationForest(
+        n_estimators=n_estimators,
+        contamination=contamination,
+        random_state=random_state,
+        n_jobs=-1,  # Use all available cores
+        verbose=verbose
+    )
+    
+    model.fit(X_train)
+    
+    logger.info("Model training completed")
+    
+    return model
 
-
-def save_model(model, output_path=None):
+def evaluate_model(model, X_test, X_train=None, threshold=None):
     """
-    Save trained Isolation Forest model to disk.
+    Evaluate the Isolation Forest model.
     
     Args:
-        model: Trained Isolation Forest model
-        output_path (Path, optional): Path to save model
+        model: Trained IsolationForest model
+        X_test: Test data
+        X_train: Training data (for comparing distributions)
+        threshold: Custom anomaly threshold (if None, use model's default)
         
     Returns:
-        bool: True if saving was successful, False otherwise
+        dict: Evaluation metrics
     """
-    try:
-        if model is None:
-            logger.error("Cannot save None model")
-            return False
+    logger.info("Evaluating Isolation Forest model")
+    
+    # Get predictions (-1 for anomalies, 1 for normal in scikit-learn)
+    y_pred = model.predict(X_test)
+    
+    # Get anomaly scores (decision function: lower = more anomalous)
+    scores_test = -model.decision_function(X_test)
+    
+    # Count anomalies
+    anomaly_count = np.sum(y_pred == -1)
+    anomaly_rate = anomaly_count / len(y_pred)
+    
+    logger.info(f"Detected {anomaly_count} anomalies ({anomaly_rate:.2%}) in test set")
+    logger.info(f"Score range: [{scores_test.min():.4f}, {scores_test.max():.4f}]")
+    
+    # If threshold provided, apply it
+    if threshold is not None:
+        custom_preds = (scores_test > threshold).astype(int)
+        custom_anomaly_count = np.sum(custom_preds)
+        custom_anomaly_rate = custom_anomaly_count / len(custom_preds)
         
-        # Use default path if not specified
-        if output_path is None:
-            output_path = MODELS_DIR / "isolation_forest.pkl"
+        logger.info(f"With custom threshold {threshold:.4f}: "
+                   f"{custom_anomaly_count} anomalies ({custom_anomaly_rate:.2%})")
+    
+    # If training data provided, compare score distributions
+    if X_train is not None:
+        scores_train = -model.decision_function(X_train)
         
-        # Save model
-        joblib.dump(model, output_path)
+        logger.info("Score statistics:")
+        logger.info(f"  Train: mean={scores_train.mean():.4f}, std={scores_train.std():.4f}")
+        logger.info(f"  Test:  mean={scores_test.mean():.4f}, std={scores_test.std():.4f}")
         
-        logger.info(f"Model saved to {output_path}")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error saving model: {e}")
-        logger.error(traceback.format_exc())
-        return False
+        # Optional: calculate additional metrics like KS test, etc.
+    
+    # Return evaluation metrics
+    metrics = {
+        "anomaly_count": anomaly_count,
+        "anomaly_rate": anomaly_rate,
+        "score_min": scores_test.min(),
+        "score_max": scores_test.max(),
+        "score_mean": scores_test.mean(),
+        "score_std": scores_test.std()
+    }
+    
+    if threshold is not None:
+        metrics.update({
+            "custom_threshold": threshold,
+            "custom_anomaly_count": custom_anomaly_count,
+            "custom_anomaly_rate": custom_anomaly_rate
+        })
+    
+    return metrics, scores_test
 
-
-def generate_predictions(model, df, feature_cols):
+def find_optimal_threshold(model, X_train, target_rate=0.01):
     """
-    Generate anomaly scores and predictions for all data.
+    Find an anomaly threshold that yields the target anomaly rate.
     
     Args:
-        model: Trained Isolation Forest model
-        df (pd.DataFrame): DataFrame containing all data
-        feature_cols (list): List of feature column names
+        model: Trained IsolationForest model
+        X_train: Training data
+        target_rate: Target anomaly rate
         
     Returns:
-        pd.DataFrame: DataFrame with added anomaly scores and predictions
+        float: Optimal threshold
     """
-    try:
-        if model is None:
-            logger.error("Cannot generate predictions with None model")
-            return None
-        
-        logger.info(f"Generating predictions for {len(df)} samples")
-        
-        # Create a copy to avoid modifying the original
-        results_df = df.copy()
-        
-        # Extract feature matrix
-        X = results_df[feature_cols].values
-        
-        # Generate anomaly scores (negative of decision function)
-        # Higher score = more anomalous
-        anomaly_scores = -model.decision_function(X)
-        
-        # Generate predictions (1 = anomaly, -1 = normal in Isolation Forest)
-        predictions = model.predict(X)
-        
-        # Convert predictions to format where 1 = anomaly, 0 = normal
-        is_anomaly = np.where(predictions == -1, 1, 0)
-        
-        # Add results to DataFrame
-        results_df['anomaly_score'] = anomaly_scores
-        results_df['is_anomaly'] = is_anomaly
-        
-        # Calculate basic statistics
-        n_anomalies = np.sum(is_anomaly)
-        anomaly_rate = n_anomalies / len(is_anomaly)
-        
-        logger.info(f"Identified {n_anomalies} anomalies ({anomaly_rate:.2%} of all samples)")
-        
-        return results_df
-        
-    except Exception as e:
-        logger.error(f"Error generating predictions: {e}")
-        logger.error(traceback.format_exc())
-        return None
+    # Get anomaly scores
+    scores = -model.decision_function(X_train)
+    
+    # Find percentile that gives target rate
+    threshold = np.percentile(scores, 100 * (1 - target_rate))
+    
+    logger.info(f"Optimal threshold for {target_rate:.2%} anomaly rate: {threshold:.4f}")
+    
+    return threshold
 
-
-def save_results(results_df, output_path=None):
+def save_model(model, model_path, threshold=None):
     """
-    Save results DataFrame to CSV.
+    Save the trained model and optional threshold.
     
     Args:
-        results_df (pd.DataFrame): DataFrame with results
-        output_path (Path, optional): Path to save results
-        
-    Returns:
-        bool: True if saving was successful, False otherwise
+        model: Trained IsolationForest model
+        model_path: Path to save the model
+        threshold: Custom anomaly threshold (optional)
     """
-    try:
-        if results_df is None or results_df.empty:
-            logger.error("Cannot save empty or None results")
-            return False
-        
-        # Use default path if not specified
-        if output_path is None:
-            output_path = REPORTS_DIR / "anomaly_scores.csv"
-        
-        # Select columns to save
-        # Start with required columns
-        columns_to_save = ['file_name', 'split', 'anomaly_score', 'is_anomaly']
-        
-        # Add reconstruction_error if it exists
-        if 'reconstruction_error' in results_df.columns:
-            columns_to_save.append('reconstruction_error')
-        
-        # Filter columns
-        output_df = results_df[columns_to_save]
-        
-        # Save to CSV
-        output_df.to_csv(output_path, index=False)
-        
-        logger.info(f"Results saved to {output_path}")
-        
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error saving results: {e}")
-        logger.error(traceback.format_exc())
-        return False
-
+    # Create directory if it doesn't exist
+    model_dir = Path(model_path).parent
+    model_dir.mkdir(parents=True, exist_ok=True)
+    
+    # If threshold provided, attach it to the model
+    if threshold is not None:
+        model._anomaly_threshold = threshold
+    
+    # Save model
+    joblib.dump(model, model_path)
+    logger.info(f"Model saved to {model_path}")
 
 def main():
     """
-    Main function to load data, train model, generate predictions, and save results.
+    Main function to load data, train model, and save results
     """
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Train Isolation Forest for anomaly detection")
+    
+    parser.add_argument("--n-estimators", type=int, default=100,
+                        help="Number of estimators (default: 100)")
+    parser.add_argument("--contamination", type=float, default=0.1,
+                        help="Expected proportion of anomalies (default: 0.1)")
+    parser.add_argument("--test-size", type=float, default=0.2,
+                        help="Proportion of data for testing (default: 0.2)")
+    parser.add_argument("--target-rate", type=float, default=0.01,
+                        help="Target anomaly rate for threshold optimization (default: 0.01)")
+    parser.add_argument("--optimize-threshold", action="store_true",
+                        help="Find optimal threshold for target anomaly rate")
+    parser.add_argument("--verbose", type=int, default=0,
+                        help="Verbosity level (default: 0)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility (default: 42)")
+    parser.add_argument("--data-path", type=str, default=None,
+                        help="Path to input data file (default: auto-detect)")
+    
+    args = parser.parse_args()
+    
+    # Set random seed
+    np.random.seed(args.seed)
+    
+    # Use Path for file path handling
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent.parent
+    
+    # Define paths
+    if args.data_path:
+        data_path = Path(args.data_path)
+    else:
+        # Try several possible latent vector paths
+        possible_data_paths = [
+            script_dir.parent / "data" / "processed" / "latents" / "latents.npy",
+            project_root / "data" / "processed" / "latents" / "latents.npy",
+            project_root / "ai_module" / "data" / "processed" / "latents" / "latents.npy"
+        ]
+        
+        data_path = None
+        for path in possible_data_paths:
+            if path.exists():
+                data_path = path
+                break
+        
+        if data_path is None:
+            logger.error("Could not find latent vectors file. Please specify with --data-path")
+            sys.exit(1)
+    
+    # Define output path
+    model_dir = script_dir.parent / "models"
+    model_path = model_dir / "isolation_forest.pkl"
+    
+    # Create directory if it doesn't exist
+    model_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Load input data
+    logger.info(f"Loading data from {data_path}")
+    
     try:
-        logger.info("Starting Isolation Forest training process")
-        
-        # Load latent vectors
-        df_all = load_latents()
-        if df_all is None or df_all.empty:
-            logger.error("Failed to load latent vectors, aborting")
-            return
-        
-        # Identify feature columns
-        feature_cols = [col for col in df_all.columns if col.startswith('feature_')]
-        if not feature_cols:
-            logger.error("No feature columns found, aborting")
-            return
-        
-        logger.info(f"Found {len(feature_cols)} feature columns")
-        
-        # Split into train/test
-        df_train = df_all[df_all['split'] == 'train'].copy()
-        
-        if len(df_train) == 0:
-            logger.error("No training samples found, aborting")
-            return
-        
-        logger.info(f"Using {len(df_train)} samples for training")
-        
-        # Train Isolation Forest model
-        model = train_isolation_forest(df_train, feature_cols)
-        if model is None:
-            logger.error("Failed to train model, aborting")
-            return
-        
-        # Save trained model
-        if not save_model(model):
-            logger.error("Failed to save model, continuing with prediction")
-        
-        # Generate predictions for all samples
-        results_df = generate_predictions(model, df_all, feature_cols)
-        if results_df is None:
-            logger.error("Failed to generate predictions, aborting")
-            return
-        
-        # Save results
-        if not save_results(results_df):
-            logger.error("Failed to save results")
-        
-        # Print summary statistics
-        logger.info("Anomaly detection summary:")
-        train_anomalies = results_df[(results_df['split'] == 'train') & (results_df['is_anomaly'] == 1)]
-        test_anomalies = results_df[(results_df['split'] == 'test') & (results_df['is_anomaly'] == 1)]
-        
-        logger.info(f"Train set: {len(train_anomalies)}/{len(df_train)} samples ({len(train_anomalies)/len(df_train):.2%}) identified as anomalies")
-        
-        test_set = df_all[df_all['split'] == 'test']
-        if len(test_set) > 0:
-            logger.info(f"Test set: {len(test_anomalies)}/{len(test_set)} samples ({len(test_anomalies)/len(test_set):.2%}) identified as anomalies")
-        
-        logger.info("Isolation Forest training and evaluation completed")
-        
+        X = np.load(data_path)
+        logger.info(f"Loaded data with shape {X.shape}")
     except Exception as e:
-        logger.error(f"Error in Isolation Forest training process: {e}")
-        logger.error(traceback.format_exc())
-
+        logger.error(f"Error loading data: {e}")
+        sys.exit(1)
+    
+    # Split data into train and test sets
+    X_train, X_test = train_test_split(
+        X, 
+        test_size=args.test_size,
+        random_state=args.seed
+    )
+    
+    logger.info(f"Train set: {X_train.shape}, Test set: {X_test.shape}")
+    
+    # Train model
+    model = train_isolation_forest(
+        X_train=X_train,
+        n_estimators=args.n_estimators,
+        contamination=args.contamination,
+        random_state=args.seed,
+        verbose=args.verbose
+    )
+    
+    # Find optimal threshold if requested
+    threshold = None
+    if args.optimize_threshold:
+        threshold = find_optimal_threshold(
+            model=model,
+            X_train=X_train,
+            target_rate=args.target_rate
+        )
+    
+    # Evaluate model
+    metrics, scores = evaluate_model(
+        model=model,
+        X_test=X_test,
+        X_train=X_train,
+        threshold=threshold
+    )
+    
+    # Print metrics
+    print("\nEvaluation Metrics:")
+    for key, value in metrics.items():
+        if isinstance(value, float):
+            print(f"  {key}: {value:.6f}")
+        else:
+            print(f"  {key}: {value}")
+    
+    # Save model
+    save_model(
+        model=model,
+        model_path=model_path,
+        threshold=threshold
+    )
+    
+    logger.info("Training and evaluation completed successfully")
 
 if __name__ == "__main__":
     main()
