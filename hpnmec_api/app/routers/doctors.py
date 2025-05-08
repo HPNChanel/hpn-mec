@@ -12,6 +12,7 @@ from app.db.database import get_db # Use the correct get_db from database.py
 # Import dependencies for authentication and authorization
 from app.api.deps import get_current_admin_user, get_current_active_user, get_db_session
 from app.models.user import User # Import User model for dependency type hint
+from app.schemas.response import ResponseModel
 
 # Define the router with prefix and tags
 router = APIRouter(

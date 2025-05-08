@@ -5,6 +5,7 @@ from app.schemas.user import UserResponse, UserUpdate
 from app.db.database import get_db
 from app.crud.crud_user import user as crud_user
 from app.api.deps import get_current_admin_user
+from app.schemas.response import ResponseModel
 
 router = APIRouter(
     prefix="/users",

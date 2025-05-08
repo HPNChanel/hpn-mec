@@ -8,6 +8,7 @@ from app.crud.crud_user import user
 from app.crud.crud_doctor_profile import doctor_profile
 from app.schemas.user_doctor_bookmark import UserDoctorBookmarkResponse, UserDoctorBookmarkCreate
 from app.db.database import get_db
+from app.schemas.response import ResponseModel
 
 router = APIRouter()
 

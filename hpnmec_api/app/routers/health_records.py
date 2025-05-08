@@ -3,6 +3,7 @@ from typing import List
 # Change HealthRecord to HealthRecordResponse
 from app.schemas.health_record import HealthRecordResponse, HealthRecordCreate, HealthRecordUpdate
 from app.api import deps
+from app.schemas.response import ResponseModel
 
 router = APIRouter(
     prefix="/health-records",

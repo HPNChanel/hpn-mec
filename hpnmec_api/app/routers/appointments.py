@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from typing import List
 from app.schemas.appointment import AppointmentResponse, AppointmentCreate, AppointmentUpdate
 from app.api import deps
+from app.schemas.response import ResponseModel
 
 router = APIRouter(
     prefix="/appointments",

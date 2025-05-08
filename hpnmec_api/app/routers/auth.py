@@ -13,10 +13,11 @@ from app.core.config import settings # Import settings
 # Import dependency for getting current user
 from app.api.deps import get_current_active_user 
 from app.models.user import User # Import User model for dependency type hint
+from app.schemas.response import ResponseModel
 
 router = APIRouter()
 
-@router.post("/login", response_model=TokenResponse) # Update response model
+@router.post("/login", response_model=ResponseModel)
 def login(
     *,
     db: Session = Depends(get_db),
@@ -38,17 +39,18 @@ def login(
     )
     
     # Return token and user data
-    return {
+    result = {
         "token": {
             "access_token": access_token,
             "token_type": "bearer"
         },
         "user": user_obj # UserResponse schema will handle formatting
     }
+    return {"status": "success", "data": result, "message": "Login successful"}
 
 @router.post(
     "/register", 
-    response_model=UserResponse,
+    response_model=ResponseModel,
     status_code=status.HTTP_201_CREATED,
     summary="Register a new user",
     description="Create a new user account with email, password, and personal information.",
@@ -70,7 +72,7 @@ def register(
         user_in (UserCreate): The user registration information
     
     Returns:
-        UserResponse: The created user data
+        ResponseModel: The status, created user data, and message
         
     Raises:
         HTTPException: If email already exists (400) or validation fails (422)
@@ -94,9 +96,9 @@ def register(
     
     # Create user - this will handle password hashing through the CRUD method
     user_obj = crud_user.create(db, obj_in=user_in) # Use renamed crud_user
-    return user_obj
+    return {"status": "success", "data": user_obj, "message": "Registration successful"}
 
-@router.get("/me", response_model=UserResponse)
+@router.get("/me", response_model=ResponseModel)
 async def read_users_me(
     current_user: User = Depends(get_current_active_user),
 ) -> Any:
@@ -104,7 +106,7 @@ async def read_users_me(
     Get current logged-in user's information.
     """
     # The dependency already fetches and validates the user
-    return current_user
+    return {"status": "success", "data": current_user, "message": "User profile retrieved"}
 
 # Optional: Add /refresh endpoint if needed
 # @router.post("/refresh", response_model=Token)
