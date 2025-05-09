@@ -1,557 +1,507 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Visualization Tools for Health Data Anomalies
+Visualization Utilities for Anomaly Detection Results
 
-This script visualizes the distribution of anomaly scores and latent space
-for a health anomaly detection system using AutoEncoder + Isolation Forest.
+This module provides functions to visualize results from anomaly detection models,
+such as histograms of anomaly scores, reconstruction errors, and comparative analyses.
 
 Author: Huỳnh Phúc Nguyên
 Created: May 2025
 """
 
-import os
-import sys
 import logging
-import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+import pandas as pd
 import seaborn as sns
 from pathlib import Path
+from typing import Optional, Union, List, Dict, Tuple, Any
+import json
 from datetime import datetime
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-from matplotlib.colors import ListedColormap
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-def ensure_dir_exists(path):
-    """
-    Ensure directory exists, create if it doesn't.
-    
-    Args:
-        path: Path to check/create
-        
-    Returns:
-        Path object
-    """
-    path_obj = Path(path)
-    path_obj.mkdir(parents=True, exist_ok=True)
-    return path_obj
+# Default paths
+REPORTS_DIR = Path("reports/plots")
+PROCESSED_DIR = Path("data/processed")
+SCORES_DIR = PROCESSED_DIR / "scores"
+LATENTS_DIR = PROCESSED_DIR / "latents"
+LABELS_DIR = PROCESSED_DIR / "labels"
 
-def load_data(scores_path, labels_path, latents_path):
+
+def setup_plot_style() -> None:
     """
-    Load anomaly scores, labels, and latent vectors.
+    Set up the matplotlib style for consistent visualizations
+    """
+    plt.style.use('seaborn-v0_8-whitegrid')
+    plt.rcParams['figure.figsize'] = (12, 8)
+    plt.rcParams['font.size'] = 12
+    plt.rcParams['axes.labelsize'] = 14
+    plt.rcParams['axes.titlesize'] = 16
+    plt.rcParams['xtick.labelsize'] = 12
+    plt.rcParams['ytick.labelsize'] = 12
+    plt.rcParams['legend.fontsize'] = 12
+    plt.rcParams['figure.titlesize'] = 20
+
+
+def load_numpy_file(file_path: Union[str, Path]) -> np.ndarray:
+    """
+    Load data from a numpy file
     
     Args:
-        scores_path: Path to anomaly scores
-        labels_path: Path to anomaly labels
-        latents_path: Path to latent vectors
+        file_path: Path to the numpy file
         
     Returns:
-        tuple: (scores, labels, latents)
+        numpy.ndarray: Loaded data
     """
+    file_path = Path(file_path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"File not found: {file_path}")
+    
     try:
-        # Load anomaly scores
-        logger.info(f"Loading anomaly scores from {scores_path}")
-        scores = np.load(scores_path)
-        logger.info(f"Loaded scores with shape {scores.shape}")
-        
-        # Load anomaly labels
-        logger.info(f"Loading anomaly labels from {labels_path}")
-        labels = np.load(labels_path)
-        logger.info(f"Loaded labels with shape {labels.shape}")
-        
-        # Load latent vectors
-        logger.info(f"Loading latent vectors from {latents_path}")
-        latents = np.load(latents_path)
-        logger.info(f"Loaded latent vectors with shape {latents.shape}")
-        
-        # Validate data
-        if len(scores) != len(labels) or len(scores) != len(latents):
-            logger.warning(f"Data size mismatch: scores={len(scores)}, labels={len(labels)}, latents={len(latents)}")
-        
-        return scores, labels, latents
-    
+        data = np.load(file_path)
+        logger.info(f"Loaded data with shape {data.shape} from {file_path}")
+        return data
     except Exception as e:
-        logger.error(f"Error loading data: {e}")
-        sys.exit(1)
+        logger.error(f"Error loading file {file_path}: {e}")
+        raise
 
-def reduce_dimensions(latents, method='pca', random_state=42):
-    """
-    Reduce latent space to 2D using PCA or t-SNE.
-    
-    Args:
-        latents: Latent vectors
-        method: Dimensionality reduction method ('pca' or 'tsne')
-        random_state: Random seed for reproducibility
-        
-    Returns:
-        numpy.ndarray: 2D representation of latent space
-    """
-    try:
-        logger.info(f"Reducing {latents.shape[1]} dimensions to 2D using {method.upper()}")
-        
-        if method.lower() == 'tsne':
-            # t-SNE for non-linear dimensionality reduction
-            reducer = TSNE(
-                n_components=2,
-                random_state=random_state,
-                n_jobs=-1,  # Use all available cores
-                verbose=1
-            )
-            
-            # Warn about t-SNE computation time for large datasets
-            if len(latents) > 5000:
-                logger.warning(f"t-SNE may be slow for {len(latents)} samples")
-        else:
-            # PCA for linear dimensionality reduction (default)
-            reducer = PCA(n_components=2, random_state=random_state)
-        
-        # Perform dimensionality reduction
-        reduced = reducer.fit_transform(latents)
-        
-        logger.info(f"Reduced dimensions to shape {reduced.shape}")
-        
-        # For PCA, log explained variance
-        if method.lower() == 'pca':
-            explained_variance = reducer.explained_variance_ratio_.sum() * 100
-            logger.info(f"PCA explained variance: {explained_variance:.2f}%")
-        
-        return reduced
-    
-    except Exception as e:
-        logger.error(f"Error reducing dimensions: {e}")
-        sys.exit(1)
 
-def plot_histogram(scores, labels, output_dir, threshold=None, bins=50, timestamp=False, save_only=False):
+def plot_anomaly_histogram(
+    scores: np.ndarray,
+    title: str = "Anomaly Score Distribution",
+    threshold: Optional[float] = None,
+    labels: Optional[np.ndarray] = None,
+    bins: int = 50,
+    output_path: Optional[Union[str, Path]] = None,
+    show_plot: bool = False,
+    figsize: Tuple[int, int] = (12, 8)
+) -> Optional[str]:
     """
-    Create and save histogram of anomaly scores.
+    Plot histogram of anomaly scores
     
     Args:
         scores: Anomaly scores
-        labels: Anomaly labels
-        output_dir: Directory to save plot
-        threshold: Anomaly threshold (optional)
+        title: Plot title
+        threshold: Anomaly threshold to show in the plot
+        labels: True labels (0=normal, 1=anomaly) if available
         bins: Number of histogram bins
-        timestamp: Whether to add timestamp to filename
-        save_only: Whether to only save plot without displaying
+        output_path: Path to save the plot (optional)
+        show_plot: Whether to display the plot
+        figsize: Figure size (width, height) in inches
         
     Returns:
-        str: Path to saved figure
+        str: Path to the saved plot if output_path provided, None otherwise
     """
-    try:
-        # Generate timestamp suffix if requested
-        suffix = ""
-        if timestamp:
-            suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # Set up plot style
+    setup_plot_style()
+    
+    # Create figure
+    plt.figure(figsize=figsize)
+    
+    # If labels are provided, create separate histograms
+    if labels is not None and len(labels) == len(scores):
+        # Get scores for normal and anomaly samples
+        normal_scores = scores[labels == 0]
+        anomaly_scores = scores[labels == 1]
         
-        # Create figure
-        plt.figure(figsize=(12, 8))
+        # Plot histograms
+        sns.histplot(normal_scores, bins=bins, alpha=0.6, label="Normal", color="blue", kde=True)
+        sns.histplot(anomaly_scores, bins=bins, alpha=0.6, label="Anomaly", color="red", kde=True)
         
-        # Set Seaborn style
-        sns.set_style("whitegrid")
+        # Add statistics to title
+        title = f"{title}\nNormal: μ={normal_scores.mean():.4f}, σ={normal_scores.std():.4f} | Anomaly: μ={anomaly_scores.mean():.4f}, σ={anomaly_scores.std():.4f}"
+    else:
+        # Plot single histogram
+        sns.histplot(scores, bins=bins, kde=True)
         
-        # Plot histogram
-        sns.histplot(scores, bins=bins, kde=True, color="skyblue")
+        # Add statistics to title
+        title = f"{title}\nμ={scores.mean():.4f}, σ={scores.std():.4f}, min={scores.min():.4f}, max={scores.max():.4f}"
+    
+    # Add threshold line if provided
+    if threshold is not None:
+        plt.axvline(x=threshold, color='red', linestyle='--', linewidth=2, label=f"Threshold = {threshold:.4f}")
         
-        # If threshold not provided, try to infer from labels
-        if threshold is None and labels is not None:
-            # Find minimum score for anomaly samples
-            anomaly_scores = scores[labels == 1]
-            if len(anomaly_scores) > 0:
-                threshold = min(anomaly_scores)
-                logger.info(f"Inferred threshold from labels: {threshold:.4f}")
-        
-        # Add threshold line if available
-        if threshold is not None:
-            plt.axvline(x=threshold, color='red', linestyle='--', 
-                       label=f'Threshold: {threshold:.4f}')
+        # If we have labels, calculate metrics at threshold
+        if labels is not None:
+            # Predict anomalies based on threshold
+            pred_anomalies = (scores > threshold).astype(int)
             
-            # Shade anomalous region
-            axes = plt.gca()
-            y_min, y_max = axes.get_ylim()
-            x_max = max(scores) * 1.1  # Add some padding
-            plt.fill_between([threshold, x_max], 0, y_max, 
-                            color='red', alpha=0.1, label='Anomalous Region')
+            # Calculate true/false positives/negatives
+            tp = np.sum((pred_anomalies == 1) & (labels == 1))
+            fp = np.sum((pred_anomalies == 1) & (labels == 0))
+            tn = np.sum((pred_anomalies == 0) & (labels == 0))
+            fn = np.sum((pred_anomalies == 0) & (labels == 1))
             
-            # Add annotation for anomaly count and percentage
-            if labels is not None:
-                anomaly_count = np.sum(labels == 1)
-                anomaly_percent = 100 * anomaly_count / len(labels)
-                plt.text(threshold * 1.05, y_max * 0.9, 
-                        f"Anomalies: {anomaly_count} ({anomaly_percent:.2f}%)",
-                        color='red', fontsize=12)
-        
-        # Add mean and median lines
-        mean_score = np.mean(scores)
-        median_score = np.median(scores)
-        
-        plt.axvline(x=mean_score, color='green', linestyle='-', 
-                   label=f'Mean: {mean_score:.4f}')
-        plt.axvline(x=median_score, color='purple', linestyle='-.', 
-                   label=f'Median: {median_score:.4f}')
-        
-        # Add labels and title
-        plt.xlabel('Anomaly Score', fontsize=14)
-        plt.ylabel('Frequency', fontsize=14)
-        plt.title('Distribution of Anomaly Scores', fontsize=16)
+            # Calculate metrics
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+            
+            # Add metrics to legend
+            plt.text(
+                0.98, 0.02, 
+                f"Precision: {precision:.4f}\nRecall: {recall:.4f}\nF1: {f1:.4f}", 
+                transform=plt.gca().transAxes, 
+                horizontalalignment='right',
+                verticalalignment='bottom',
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8)
+            )
+    
+    # Set labels and title
+    plt.xlabel("Anomaly Score")
+    plt.ylabel("Frequency")
+    plt.title(title)
+    
+    # Add legend if needed
+    if labels is not None or threshold is not None:
         plt.legend()
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        # Save figure
-        output_path = output_dir / f"hist_anomaly_scores{suffix}.png"
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        logger.info(f"Saved histogram to {output_path}")
-        
-        # Show figure if requested
-        if not save_only:
-            plt.show()
-        else:
-            plt.close()
-        
-        return str(output_path)
     
-    except Exception as e:
-        logger.error(f"Error plotting histogram: {e}")
-        return None
+    # Tight layout for better spacing
+    plt.tight_layout()
+    
+    # Save plot if output path provided
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        logger.info(f"Saved plot to {output_path}")
+    
+    # Show plot if requested
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+    
+    # Return the path to the saved plot
+    return str(output_path) if output_path else None
 
-def plot_scatter(latents, labels, output_dir, method='pca', timestamp=False, save_only=False):
+
+def plot_reconstruction_error(
+    original: np.ndarray,
+    reconstructed: np.ndarray,
+    sample_indices: Optional[List[int]] = None,
+    n_samples: int = 5,
+    feature_names: Optional[List[str]] = None,
+    output_path: Optional[Union[str, Path]] = None,
+    show_plot: bool = False,
+    figsize: Tuple[int, int] = (15, 10)
+) -> Optional[str]:
     """
-    Create and save scatter plot of 2D latent features.
+    Plot original vs reconstructed samples to visualize reconstruction error
     
     Args:
-        latents: Latent vectors
-        labels: Anomaly labels
-        output_dir: Directory to save plot
-        method: Dimensionality reduction method ('pca' or 'tsne')
-        timestamp: Whether to add timestamp to filename
-        save_only: Whether to only save plot without displaying
+        original: Original feature vectors
+        reconstructed: Reconstructed feature vectors
+        sample_indices: Indices of specific samples to plot (optional)
+        n_samples: Number of random samples to plot if indices not provided
+        feature_names: Names of features for x-axis
+        output_path: Path to save the plot (optional)
+        show_plot: Whether to display the plot
+        figsize: Figure size (width, height) in inches
         
     Returns:
-        str: Path to saved figure
+        str: Path to the saved plot if output_path provided, None otherwise
     """
-    try:
-        # Generate timestamp suffix if requested
-        suffix = ""
-        if timestamp:
-            suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        
-        # Reduce dimensions to 2D
-        reduced_latents = reduce_dimensions(latents, method=method)
-        
-        # Create figure
-        plt.figure(figsize=(12, 10))
-        
-        # Set Seaborn style
-        sns.set_style("whitegrid")
-        
-        # Create custom colormap
-        colors = np.array(['#1f77b4', '#d62728'])  # Blue for normal, red for anomaly
-        cmap = ListedColormap(colors)
-        
-        # Plot scatter
-        scatter = plt.scatter(
-            reduced_latents[:, 0],
-            reduced_latents[:, 1],
-            c=labels,
-            cmap=cmap,
-            alpha=0.7,
-            s=50,
-            edgecolors='w',
-            linewidths=0.5
-        )
-        
-        # Calculate stats for legend
-        normal_count = np.sum(labels == 0)
-        anomaly_count = np.sum(labels == 1)
-        total_count = len(labels)
-        
-        # Add legend
-        legend_labels = [
-            f'Normal ({normal_count}, {100*normal_count/total_count:.1f}%)',
-            f'Anomaly ({anomaly_count}, {100*anomaly_count/total_count:.1f}%)'
-        ]
-        plt.legend(handles=scatter.legend_elements()[0], labels=legend_labels)
-        
-        # Add labels and title
-        method_name = 'PCA' if method.lower() == 'pca' else 't-SNE'
-        plt.xlabel(f'{method_name} Component 1', fontsize=14)
-        plt.ylabel(f'{method_name} Component 2', fontsize=14)
-        plt.title(f'2D Projection of Latent Space using {method_name}', fontsize=16)
-        
-        # Add grid
-        plt.grid(True, alpha=0.3)
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        # Save figure
-        output_path = output_dir / f"scatter_latent_space_{method.lower()}{suffix}.png"
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        logger.info(f"Saved scatter plot to {output_path}")
-        
-        # Show figure if requested
-        if not save_only:
-            plt.show()
-        else:
-            plt.close()
-        
-        return str(output_path)
+    # Verify input dimensions
+    if original.shape != reconstructed.shape:
+        raise ValueError(f"Shape mismatch: original {original.shape} vs reconstructed {reconstructed.shape}")
     
-    except Exception as e:
-        logger.error(f"Error plotting scatter: {e}")
-        return None
+    # Select samples to plot
+    if sample_indices is None:
+        # Randomly select samples
+        sample_indices = np.random.choice(len(original), min(n_samples, len(original)), replace=False)
+    else:
+        # Use provided indices, ensure they're valid
+        sample_indices = [i for i in sample_indices if 0 <= i < len(original)]
+        if not sample_indices:
+            raise ValueError("No valid sample indices provided")
+    
+    # Get default feature names if not provided
+    if feature_names is None:
+        feature_names = [f"Feature {i+1}" for i in range(original.shape[1])]
+    
+    # Set up plot style
+    setup_plot_style()
+    
+    # Create subplot grid
+    n_rows = len(sample_indices)
+    fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=True)
+    
+    # Handle the case of a single sample (axes not array)
+    if n_rows == 1:
+        axes = [axes]
+    
+    # Plot each sample
+    for i, (ax, idx) in enumerate(zip(axes, sample_indices)):
+        # Get original and reconstructed data for this sample
+        orig = original[idx]
+        recon = reconstructed[idx]
+        
+        # Calculate reconstruction error
+        mse = np.mean((orig - recon) ** 2)
+        
+        # Plot original values
+        ax.plot(orig, 'b-', marker='o', label='Original')
+        
+        # Plot reconstructed values
+        ax.plot(recon, 'r-', marker='x', label='Reconstructed')
+        
+        # Add legend and title
+        if i == 0:
+            ax.legend(loc='upper right')
+        ax.set_title(f"Sample {idx}: MSE = {mse:.4f}")
+        
+        # Set feature names on x-axis for bottom subplot
+        if i == n_rows - 1:
+            ax.set_xticks(range(len(feature_names)))
+            ax.set_xticklabels(feature_names, rotation=45, ha='right')
+    
+    # Add overall title
+    plt.suptitle("Original vs Reconstructed Samples", fontsize=16)
+    
+    # Adjust layout
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.9)
+    
+    # Save plot if output path provided
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        logger.info(f"Saved reconstruction error plot to {output_path}")
+    
+    # Show plot if requested
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+    
+    # Return the path to the saved plot
+    return str(output_path) if output_path else None
 
-def plot_kde(latents, labels, output_dir, method='pca', timestamp=False, save_only=False):
+
+def compare_anomaly_scores(
+    scores_dict: Dict[str, np.ndarray],
+    title: str = "Comparison of Anomaly Detection Methods",
+    labels: Optional[np.ndarray] = None,
+    output_path: Optional[Union[str, Path]] = None,
+    show_plot: bool = False,
+    figsize: Tuple[int, int] = (15, 10)
+) -> Optional[str]:
     """
-    Create and save KDE plot of anomaly density in latent space.
+    Compare anomaly scores from different methods
     
     Args:
-        latents: Latent vectors
-        labels: Anomaly labels
-        output_dir: Directory to save plot
-        method: Dimensionality reduction method ('pca' or 'tsne')
-        timestamp: Whether to add timestamp to filename
-        save_only: Whether to only save plot without displaying
+        scores_dict: Dictionary mapping method names to score arrays
+        title: Plot title
+        labels: True labels (0=normal, 1=anomaly) if available
+        output_path: Path to save the plot (optional)
+        show_plot: Whether to display the plot
+        figsize: Figure size (width, height) in inches
         
     Returns:
-        str: Path to saved figure
+        str: Path to the saved plot if output_path provided, None otherwise
     """
-    try:
-        # Generate timestamp suffix if requested
-        suffix = ""
-        if timestamp:
-            suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # Check that we have scores to compare
+    if not scores_dict:
+        raise ValueError("No scores provided for comparison")
+    
+    # Set up plot style
+    setup_plot_style()
+    
+    # Create figure with subplots
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    
+    # Create DataFrame for correlation analysis
+    scores_df = pd.DataFrame(scores_dict)
+    
+    # Add labels if available
+    if labels is not None and len(labels) == len(next(iter(scores_dict.values()))):
+        scores_df['Label'] = labels
+    
+    # Plot 1: Heatmap of correlations between methods
+    corr = scores_df.corr()
+    sns.heatmap(corr, annot=True, cmap='coolwarm', vmin=-1, vmax=1, ax=axes[0])
+    axes[0].set_title("Correlation Between Methods")
+    
+    # Plot 2: Pairplot or scatter if we have 2 methods
+    if len(scores_dict) == 2:
+        method1, method2 = list(scores_dict.keys())
         
-        # Reduce dimensions to 2D
-        reduced_latents = reduce_dimensions(latents, method=method)
-        
-        # Only proceed if we have anomalies
-        if np.sum(labels == 1) == 0:
-            logger.warning("No anomalies found, skipping KDE plot")
-            return None
-        
-        # Create figure
-        fig, ax = plt.subplots(figsize=(12, 10))
-        
-        # Set Seaborn style
-        sns.set_style("whitegrid")
-        
-        # Create dataframe for Seaborn
-        import pandas as pd
-        df = pd.DataFrame({
-            'Component 1': reduced_latents[:, 0],
-            'Component 2': reduced_latents[:, 1],
-            'Class': ['Normal' if label == 0 else 'Anomaly' for label in labels]
-        })
-        
-        # Plot KDE for normal samples
-        sns.kdeplot(
-            data=df[df['Class'] == 'Normal'],
-            x='Component 1',
-            y='Component 2',
-            fill=True,
-            alpha=0.5,
-            levels=5,
-            cmap="Blues",
-            ax=ax,
-            label='Normal'
-        )
-        
-        # Plot KDE for anomaly samples
-        sns.kdeplot(
-            data=df[df['Class'] == 'Anomaly'],
-            x='Component 1',
-            y='Component 2',
-            fill=True,
-            alpha=0.5,
-            levels=5,
-            cmap="Reds",
-            ax=ax,
-            label='Anomaly'
-        )
-        
-        # Add scatter points
-        sns.scatterplot(
-            data=df,
-            x='Component 1',
-            y='Component 2',
-            hue='Class',
-            palette={'Normal': 'blue', 'Anomaly': 'red'},
-            alpha=0.7,
-            s=30,
-            edgecolor='w',
-            linewidth=0.5,
-            ax=ax
-        )
-        
-        # Add labels and title
-        method_name = 'PCA' if method.lower() == 'pca' else 't-SNE'
-        plt.xlabel(f'{method_name} Component 1', fontsize=14)
-        plt.ylabel(f'{method_name} Component 2', fontsize=14)
-        plt.title(f'Density Distribution in Latent Space using {method_name}', fontsize=16)
-        
-        # Add legend
-        handles, labels = ax.get_legend_handles_labels()
-        by_label = dict(zip(labels, handles))
-        ax.legend(by_label.values(), by_label.keys(), title="Class")
-        
-        # Adjust layout
-        plt.tight_layout()
-        
-        # Save figure
-        output_path = output_dir / f"anomaly_kde_{method.lower()}{suffix}.png"
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        logger.info(f"Saved KDE plot to {output_path}")
-        
-        # Show figure if requested
-        if not save_only:
-            plt.show()
+        # Create scatter plot with labels if available
+        if labels is not None:
+            # Split by label
+            normal_mask = (labels == 0)
+            anomaly_mask = (labels == 1)
+            
+            # Plot normal points
+            axes[1].scatter(
+                scores_dict[method1][normal_mask], 
+                scores_dict[method2][normal_mask], 
+                alpha=0.6, 
+                label="Normal", 
+                color="blue"
+            )
+            
+            # Plot anomaly points
+            axes[1].scatter(
+                scores_dict[method1][anomaly_mask], 
+                scores_dict[method2][anomaly_mask], 
+                alpha=0.6, 
+                label="Anomaly", 
+                color="red"
+            )
+            
+            axes[1].legend()
         else:
-            plt.close()
+            # Simple scatter without labels
+            axes[1].scatter(
+                scores_dict[method1], 
+                scores_dict[method2], 
+                alpha=0.6
+            )
         
-        return str(output_path)
+        # Set labels
+        axes[1].set_xlabel(method1)
+        axes[1].set_ylabel(method2)
+        axes[1].set_title("Scatter Plot of Anomaly Scores")
+    else:
+        # For 3+ methods, show distribution plots
+        for method, scores in scores_dict.items():
+            sns.kdeplot(scores, label=method, ax=axes[1])
+        
+        axes[1].set_xlabel("Anomaly Score")
+        axes[1].set_ylabel("Density")
+        axes[1].set_title("Distribution of Anomaly Scores")
+        axes[1].legend()
     
-    except Exception as e:
-        logger.error(f"Error plotting KDE: {e}")
-        return None
+    # Set overall title
+    plt.suptitle(title, fontsize=16)
+    
+    # Adjust layout
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.9)
+    
+    # Save plot if output path provided
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        logger.info(f"Saved comparison plot to {output_path}")
+    
+    # Show plot if requested
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+    
+    # Return the path to the saved plot
+    return str(output_path) if output_path else None
 
-def parse_args():
-    """
-    Parse command line arguments.
-    
-    Returns:
-        argparse.Namespace: Parsed arguments
-    """
-    parser = argparse.ArgumentParser(description="Visualize anomaly scores and latent space")
-    
-    parser.add_argument(
-        "--latents-path",
-        type=str,
-        default="data/processed/latent_vectors/latents.npy",
-        help="Path to latent vectors file (default: %(default)s)"
-    )
-    
-    parser.add_argument(
-        "--scores-path",
-        type=str,
-        default="data/processed/latent_vectors/anomaly_scores.npy",
-        help="Path to anomaly scores file (default: %(default)s)"
-    )
-    
-    parser.add_argument(
-        "--labels-path",
-        type=str,
-        default="data/processed/latent_vectors/anomaly_labels.npy",
-        help="Path to anomaly labels file (default: %(default)s)"
-    )
-    
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="data/processed/visuals",
-        help="Directory to save visualizations (default: %(default)s)"
-    )
-    
-    parser.add_argument(
-        "--use-tsne",
-        action="store_true",
-        help="Use t-SNE instead of PCA for dimensionality reduction"
-    )
-    
-    parser.add_argument(
-        "--save-only",
-        action="store_true",
-        help="Save plots without displaying them"
-    )
-    
-    parser.add_argument(
-        "--timestamp",
-        action="store_true",
-        help="Add timestamp to output filenames"
-    )
-    
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=None,
-        help="Threshold for anomaly scores (optional)"
-    )
-    
-    parser.add_argument(
-        "--bins",
-        type=int,
-        default=50,
-        help="Number of bins for histogram (default: %(default)s)"
-    )
-    
-    parser.add_argument(
-        "--no-kde",
-        action="store_true",
-        help="Skip KDE plot generation"
-    )
-    
-    return parser.parse_args()
 
 def main():
     """
-    Main function to load data and create visualizations.
+    Main entry point for visualization
     """
-    # Parse command line arguments
-    args = parse_args()
+    import argparse
+    
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description="Visualize anomaly detection results")
+    parser.add_argument("--scores-path", type=str, help="Path to anomaly scores file")
+    parser.add_argument("--labels-path", type=str, help="Path to labels file (optional)")
+    parser.add_argument("--threshold", type=float, help="Anomaly threshold to use (optional)")
+    parser.add_argument("--model-type", type=str, choices=["autoencoder", "isolation_forest", "combined"], 
+                      default="combined", help="Model type to visualize (default: combined)")
+    parser.add_argument("--output-dir", type=str, default="reports/plots", help="Directory to save plots")
+    parser.add_argument("--show", action="store_true", help="Show plots instead of saving")
+    parser.add_argument("--timestamp", action="store_true", help="Add timestamp to filenames")
+    args = parser.parse_args()
     
     # Ensure output directory exists
-    output_dir = ensure_dir_exists(Path(args.output_dir))
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Load data
-    scores, labels, latents = load_data(
-        scores_path=args.scores_path,
-        labels_path=args.labels_path,
-        latents_path=args.latents_path
-    )
+    # Add timestamp to filenames if requested
+    timestamp_str = ""
+    if args.timestamp:
+        timestamp_str = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    # Create histogram
-    plot_histogram(
-        scores=scores,
-        labels=labels,
-        output_dir=output_dir,
-        threshold=args.threshold,
-        bins=args.bins,
-        timestamp=args.timestamp,
-        save_only=args.save_only
-    )
+    # Determine scores paths
+    if args.scores_path:
+        # Use provided path
+        scores_paths = {args.model_type: Path(args.scores_path)}
+    else:
+        # Use default paths based on model type
+        if args.model_type == "combined":
+            # Look for both types of scores
+            scores_paths = {
+                "autoencoder": SCORES_DIR / "ae_reconstruction_errors.npy",
+                "isolation_forest": SCORES_DIR / "if_anomaly_scores.npy"
+            }
+        else:
+            # Look for specific model scores
+            if args.model_type == "autoencoder":
+                scores_paths = {"autoencoder": SCORES_DIR / "ae_reconstruction_errors.npy"}
+            else:  # isolation_forest
+                scores_paths = {"isolation_forest": SCORES_DIR / "if_anomaly_scores.npy"}
     
-    # Create scatter plot
-    method = 'tsne' if args.use_tsne else 'pca'
-    plot_scatter(
-        latents=latents,
-        labels=labels,
-        output_dir=output_dir,
-        method=method,
-        timestamp=args.timestamp,
-        save_only=args.save_only
-    )
+    # Load scores
+    scores_dict = {}
+    for model, path in scores_paths.items():
+        try:
+            scores_dict[model] = load_numpy_file(path)
+        except FileNotFoundError:
+            logger.warning(f"Could not find scores for {model} at {path}")
     
-    # Create KDE plot if requested
-    if not args.no_kde:
-        plot_kde(
-            latents=latents,
+    if not scores_dict:
+        logger.error("No scores found. Please run model training/evaluation first.")
+        return
+    
+    # Load labels if path provided
+    labels = None
+    if args.labels_path:
+        try:
+            labels = load_numpy_file(args.labels_path)
+            logger.info(f"Loaded labels with shape {labels.shape}")
+        except FileNotFoundError:
+            logger.warning(f"Labels file not found: {args.labels_path}")
+    
+    # Create output paths
+    output_paths = {}
+    for model in scores_dict.keys():
+        output_paths[model] = output_dir / f"{model}_histogram{timestamp_str}.png"
+    
+    # Plot histograms for each model
+    for model, scores in scores_dict.items():
+        plot_anomaly_histogram(
+            scores=scores,
+            title=f"{model.replace('_', ' ').title()} Anomaly Score Distribution",
+            threshold=args.threshold,
             labels=labels,
-            output_dir=output_dir,
-            method=method,
-            timestamp=args.timestamp,
-            save_only=args.save_only
+            output_path=output_paths[model] if not args.show else None,
+            show_plot=args.show
         )
     
-    logger.info("Visualization generation complete.")
+    # If we have multiple models, compare them
+    if len(scores_dict) > 1:
+        comparison_path = output_dir / f"anomaly_score_comparison{timestamp_str}.png"
+        compare_anomaly_scores(
+            scores_dict=scores_dict,
+            title="Comparison of Anomaly Detection Methods",
+            labels=labels,
+            output_path=comparison_path if not args.show else None,
+            show_plot=args.show
+        )
+    
+    logger.info("Visualization completed successfully")
+
 
 if __name__ == "__main__":
     main()

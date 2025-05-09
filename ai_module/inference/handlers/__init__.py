@@ -1,18 +1,30 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Inference handlers for different model types
+Model Handlers for Inference
 
-This package contains handlers for specific model types:
-- autoencoder_handler: For AutoEncoder models
-- isolation_forest_handler: For Isolation Forest anomaly detection models
-- shap_handler: For SHAP explainability
+This module provides handlers for different model types, allowing for
+consistent inference interfaces across different model implementations.
+
+Author: Huỳnh Phúc Nguyên
+Created: May 2025
 """
 
-from . import autoencoder_handler
-from . import isolation_forest_handler
-from . import shap_handler
+import logging
 
-__all__ = [
-    'autoencoder_handler',
-    'isolation_forest_handler',
-    'shap_handler'
-] 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Import model handlers
+try:
+    from ai_module.inference.handlers.autoencoder_handler import AutoencoderHandler
+    from ai_module.inference.handlers.isolation_forest_handler import IsolationForestHandler
+    
+    __all__ = ['AutoencoderHandler', 'IsolationForestHandler']
+except ImportError as e:
+    logger.warning(f"Model handlers could not be imported: {e}")
+    __all__ = [] 

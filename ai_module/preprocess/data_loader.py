@@ -10,13 +10,14 @@ Author: Huỳnh Phúc Nguyên
 Created: May 2025
 """
 
-import os
 import logging
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from sklearn.preprocessing import MinMaxScaler
 from typing import Dict, List, Tuple, Union, Optional
+import json
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -113,6 +114,7 @@ class DataLoader:
             column_mapping: Custom column name mapping (default: None, uses built-in mapping)
             important_features: List of important features to keep (default: None, uses built-in list)
         """
+        # Convert string paths to Path objects
         self.raw_data_dir = Path(raw_data_dir)
         self.processed_dir = Path(processed_dir)
         
@@ -120,8 +122,11 @@ class DataLoader:
         self.features_dir = self.processed_dir / "features"
         self.labels_dir = self.processed_dir / "labels"
         self.combined_dir = self.processed_dir / "combined"
+        self.latents_dir = self.processed_dir / "latents"
+        self.scores_dir = self.processed_dir / "scores"
         
-        for directory in [self.features_dir, self.labels_dir, self.combined_dir]:
+        for directory in [self.features_dir, self.labels_dir, self.combined_dir, 
+                          self.latents_dir, self.scores_dir]:
             directory.mkdir(parents=True, exist_ok=True)
         
         # Use custom column mapping if provided, otherwise use default
@@ -430,7 +435,6 @@ class DataLoader:
         # Generate timestamp suffix if requested
         suffix = ""
         if timestamp:
-            from datetime import datetime
             suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         # Save feature matrix
@@ -471,7 +475,6 @@ class DataLoader:
         # Generate timestamp suffix if requested
         suffix = ""
         if timestamp:
-            from datetime import datetime
             suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         # Save to CSV

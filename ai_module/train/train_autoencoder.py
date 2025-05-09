@@ -11,24 +11,17 @@ Author: Huỳnh Phúc Nguyên
 Created: May 2025
 """
 
-import os
-import sys
 import logging
 import argparse
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import TensorDataset, DataLoader, random_split
+import json
+from torch.utils.data import TensorDataset, DataLoader as TorchDataLoader, random_split
 from pathlib import Path
+from typing import Tuple, Dict, Optional, List, Union
 from tqdm import tqdm
-
-# Add parent directory to sys.path if running as script
-if __name__ == "__main__":
-    current_file = Path(__file__).resolve()
-    project_root = current_file.parent.parent.parent
-    if str(project_root) not in sys.path:
-        sys.path.insert(0, str(project_root))
 
 # Configure logging
 logging.basicConfig(
@@ -37,78 +30,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Try to import the AutoEncoder class from the models module
-try:
-    from ..models.autoencoder import AutoEncoder
-    logger.info("Imported AutoEncoder class from models module")
-except ImportError:
-    # Define the class locally if import fails
-    logger.info("Defining AutoEncoder class locally")
+# Import from project modules
+from ai_module.models.autoencoder import AutoEncoder
+from ai_module.data_loader import DataLoader
 
-    class AutoEncoder(nn.Module):
-        """
-        Autoencoder neural network for unsupervised anomaly detection
-        """
-        
-        def __init__(self, input_dim, latent_dim=16, dropout=0.2, use_sigmoid=False):
-            """
-            Initialize autoencoder with configurable dimensions and dropout
-            
-            Args:
-                input_dim (int): Dimension of input features
-                latent_dim (int): Dimension of latent space (bottleneck)
-                dropout (float): Dropout rate for regularization
-                use_sigmoid (bool): Whether to use sigmoid activation on output
-            """
-            super(AutoEncoder, self).__init__()
-            self.input_dim = input_dim
-            self.latent_dim = latent_dim
-            self.use_sigmoid = use_sigmoid
-            
-            # Encoder
-            self.encoder = nn.Sequential(
-                nn.Linear(input_dim, 128),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(128, 64),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(64, latent_dim),
-                nn.ReLU()
-            )
-            
-            # Decoder
-            decoder_layers = [
-                nn.Linear(latent_dim, 64),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(64, 128),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(128, input_dim)
-            ]
-            
-            # Add sigmoid if requested (useful if input data is normalized to [0,1])
-            if use_sigmoid:
-                decoder_layers.append(nn.Sigmoid())
-                
-            self.decoder = nn.Sequential(*decoder_layers)
-        
-        def forward(self, x):
-            """
-            Forward pass through the autoencoder
-            
-            Args:
-                x: Input tensor
-                
-            Returns:
-                tuple: (reconstructed_output, latent_vector)
-            """
-            latent = self.encoder(x)
-            reconstructed = self.decoder(latent)
-            return reconstructed, latent
+# Default paths
+MODELS_DIR = Path(__file__).parent.parent / "models"
+LATENTS_DIR = Path("data/processed/latents")
 
-def build_autoencoder(input_dim, latent_dim=16, dropout=0.2, use_sigmoid=False):
+
+def build_autoencoder(input_dim: int, latent_dim: int = 16, dropout: float = 0.2, use_sigmoid: bool = False) -> AutoEncoder:
     """
     Build an autoencoder model with the specified dimensions
     
@@ -124,8 +55,19 @@ def build_autoencoder(input_dim, latent_dim=16, dropout=0.2, use_sigmoid=False):
     model = AutoEncoder(input_dim, latent_dim, dropout, use_sigmoid)
     return model
 
-def train_model(model, train_loader, val_loader=None, epochs=50, lr=0.001, 
-                device='cpu', save_interval=10, model_path='model.pt'):
+
+def train_model(
+    model: nn.Module, 
+    train_loader: TorchDataLoader, 
+    val_loader: Optional[TorchDataLoader] = None, 
+    epochs: int = 50, 
+    lr: float = 0.001, 
+    device: str = 'cpu', 
+    save_interval: int = 10, 
+    model_path: Union[str, Path] = 'model.pt',
+    max_grad_norm: float = 1.0,
+    weight_decay: float = 1e-5
+) -> Tuple[nn.Module, List[float]]:
     """
     Train the autoencoder model
     
@@ -138,6 +80,8 @@ def train_model(model, train_loader, val_loader=None, epochs=50, lr=0.001,
         device: Device to train on ('cpu' or 'cuda')
         save_interval: Save checkpoint every N epochs (0 to disable)
         model_path: Path to save the model
+        max_grad_norm: Maximum norm for gradient clipping
+        weight_decay: L2 regularization factor
         
     Returns:
         tuple: (trained_model, losses)
@@ -145,9 +89,16 @@ def train_model(model, train_loader, val_loader=None, epochs=50, lr=0.001,
     # Move model to device
     model.to(device)
     
+    # Initialize model weights properly to prevent vanishing/exploding gradients
+    for m in model.modules():
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_normal_(m.weight)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+    
     # Define loss function and optimizer
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     
     # Lists to store losses
     train_losses = []
@@ -161,6 +112,7 @@ def train_model(model, train_loader, val_loader=None, epochs=50, lr=0.001,
         # Training phase
         model.train()
         running_loss = 0.0
+        nan_detected = False
         
         # Use tqdm for progress bar
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
@@ -169,6 +121,11 @@ def train_model(model, train_loader, val_loader=None, epochs=50, lr=0.001,
             # Get data (autoencoder's input is same as target)
             inputs = batch[0].to(device)
             targets = inputs
+            
+            # Skip batch if it contains NaN values
+            if torch.isnan(inputs).any():
+                logger.warning(f"NaN values detected in input batch {batch_idx}, skipping")
+                continue
             
             # Zero gradients
             optimizer.zero_grad()
@@ -179,8 +136,19 @@ def train_model(model, train_loader, val_loader=None, epochs=50, lr=0.001,
             # Calculate loss
             loss = criterion(outputs, targets)
             
-            # Backward pass and optimize
+            # Check for NaN loss
+            if torch.isnan(loss).item():
+                logger.warning(f"NaN loss detected at epoch {epoch+1}, batch {batch_idx}. Skipping batch.")
+                nan_detected = True
+                continue
+            
+            # Backward pass
             loss.backward()
+            
+            # Gradient clipping to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            
+            # Optimize
             optimizer.step()
             
             # Update statistics
@@ -189,291 +157,296 @@ def train_model(model, train_loader, val_loader=None, epochs=50, lr=0.001,
             # Update progress bar with current loss
             progress_bar.set_postfix({'loss': f"{loss.item():.6f}"})
         
+        # Check if NaN was detected
+        if nan_detected:
+            logger.warning(f"NaN values detected during epoch {epoch+1}. Consider reducing learning rate.")
+        
         # Calculate average loss for the epoch
-        epoch_loss = running_loss / len(train_loader.dataset)
-        train_losses.append(epoch_loss)
+        if len(train_loader.dataset) > 0:
+            epoch_loss = running_loss / len(train_loader.dataset)
+            train_losses.append(epoch_loss)
+        else:
+            logger.warning("Empty training dataset or all batches contained NaN")
+            epoch_loss = float('nan')
+            train_losses.append(epoch_loss)
         
         # Validation if loader provided
         val_msg = ""
         if val_loader is not None:
             model.eval()
             val_loss = 0.0
+            val_nan_detected = False
             
             with torch.no_grad():
                 for batch in val_loader:
                     inputs = batch[0].to(device)
                     targets = inputs
                     
+                    # Skip batch if it contains NaN
+                    if torch.isnan(inputs).any():
+                        continue
+                    
                     outputs, _ = model(inputs)
                     loss = criterion(outputs, targets)
                     
+                    # Check for NaN loss
+                    if torch.isnan(loss).item():
+                        val_nan_detected = True
+                        continue
+                    
                     val_loss += loss.item() * inputs.size(0)
             
-            val_loss = val_loss / len(val_loader.dataset)
-            val_msg = f", Validation Loss: {val_loss:.6f}"
+            if len(val_loader.dataset) > 0 and not val_nan_detected:
+                val_loss = val_loss / len(val_loader.dataset)
+                val_msg = f", Validation Loss: {val_loss:.6f}"
+            else:
+                val_msg = ", Validation Loss: NaN (detected NaNs)"
         
         # Log progress
-        logger.info(f"Epoch {epoch+1}/{epochs}, Training Loss: {epoch_loss:.6f}{val_msg}")
+        logger.info(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss:.6f}{val_msg}")
         
-        # Save checkpoint if requested
+        # Save intermediate checkpoint
         if save_interval > 0 and (epoch + 1) % save_interval == 0:
-            checkpoint_path = f"{str(model_path).split('.')[0]}_epoch_{epoch+1}.pt"
-            torch.save(model.state_dict(), checkpoint_path)
+            checkpoint_path = Path(str(model_path).replace('.pt', f'_epoch_{epoch+1}.pt'))
+            torch.save(model, checkpoint_path)
             logger.info(f"Saved checkpoint to {checkpoint_path}")
     
     # Save final model
-    torch.save(model.state_dict(), model_path)
+    torch.save(model, model_path)
     logger.info(f"Saved model to {model_path}")
     
     return model, train_losses
 
-def save_latents(model, dataloader, device, latent_dir, save_errors=True, timestamp=False):
+
+def save_latents(
+    model: nn.Module, 
+    dataloader: TorchDataLoader, 
+    device: torch.device, 
+    latent_dir: Union[str, Path], 
+    save_errors: bool = True, 
+    timestamp: bool = False
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
     """
-    Extract and save latent representations and reconstruction errors
+    Generate and save latent representations for data
     
     Args:
         model: Trained autoencoder model
-        dataloader: DataLoader with input data
-        device: Device to run inference on
-        latent_dir: Directory to save latent vectors
+        dataloader: Data loader with input data
+        device: Device to run model on
+        latent_dir: Directory to save latent representations
         save_errors: Whether to save reconstruction errors
         timestamp: Whether to add timestamp to filenames
         
     Returns:
-        tuple: (latent_vectors, reconstruction_errors)
+        tuple: (latent_vectors, reconstruction_errors or None)
     """
     model.eval()
-    all_latents = []
-    all_errors = []
     
-    # Generate timestamp suffix if requested
-    suffix = ""
-    if timestamp:
-        from datetime import datetime
-        suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
-    # Create directory if it doesn't exist
+    # Convert latent_dir to Path and create if doesn't exist
     latent_dir = Path(latent_dir)
     latent_dir.mkdir(parents=True, exist_ok=True)
     
-    # Extract latent vectors and errors
+    # Prepare filename suffix if timestamp requested
+    suffix = ""
+    if timestamp:
+        from datetime import datetime
+        suffix = f"_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    
+    # Collect latent vectors and reconstruction errors
+    all_latents = []
+    all_errors = [] if save_errors else None
+    
     with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Extracting latent vectors"):
+        for batch in tqdm(dataloader, desc="Generating latent vectors"):
             inputs = batch[0].to(device)
             
-            # Get reconstructions and latent vectors
-            reconstructions, latents = model(inputs)
+            # Skip batch if it contains NaN values
+            if torch.isnan(inputs).any():
+                logger.warning("NaN values detected in input batch, skipping")
+                continue
             
-            # Calculate reconstruction error for each sample
-            errors = torch.sum((reconstructions - inputs) ** 2, dim=1)
+            # Get reconstructed outputs and latent vectors
+            outputs, latents = model(inputs)
             
-            # Store results
+            # Store latent vectors
             all_latents.append(latents.cpu().numpy())
-            all_errors.append(errors.cpu().numpy())
+            
+            # Calculate and store reconstruction errors if requested
+            if save_errors:
+                errors = torch.mean((outputs - inputs) ** 2, dim=1)
+                all_errors.append(errors.cpu().numpy())
     
-    # Concatenate results
-    latent_vectors = np.concatenate(all_latents)
-    errors = np.concatenate(all_errors)
+    # Concatenate batches
+    latent_vectors = np.vstack(all_latents) if all_latents else np.array([])
+    
+    if save_errors and all_errors:
+        reconstruction_errors = np.concatenate(all_errors)
+    else:
+        reconstruction_errors = None
     
     # Save latent vectors
-    latents_path = latent_dir / f"latents{suffix}.npy"
-    np.save(latents_path, latent_vectors)
-    logger.info(f"Saved latent vectors with shape {latent_vectors.shape} to {latents_path}")
+    latent_path = latent_dir / f"latents{suffix}.npy"
+    np.save(latent_path, latent_vectors)
+    logger.info(f"Saved latent vectors with shape {latent_vectors.shape} to {latent_path}")
     
-    # Save errors if requested
-    if save_errors:
-        errors_path = latent_dir / f"errors{suffix}.npy"
-        np.save(errors_path, errors)
-        logger.info(f"Saved reconstruction errors with shape {errors.shape} to {errors_path}")
+    # Save reconstruction errors if available
+    if reconstruction_errors is not None:
+        error_path = latent_dir / f"reconstruction_errors{suffix}.npy"
+        np.save(error_path, reconstruction_errors)
+        logger.info(f"Saved reconstruction errors with shape {reconstruction_errors.shape} to {error_path}")
     
-    return latent_vectors, errors
+    return latent_vectors, reconstruction_errors
 
-def setup_device():
+
+def save_model_metadata(model: AutoEncoder, metadata_path: Union[str, Path]) -> None:
     """
-    Set up and return the appropriate device (CUDA or CPU)
+    Save model metadata to JSON file
+    
+    Args:
+        model: Trained autoencoder model
+        metadata_path: Path to save metadata
+    """
+    metadata = {
+        "input_dim": model.input_dim,
+        "latent_dim": model.latent_dim,
+        "use_sigmoid": model.use_sigmoid,
+        "creation_time": str(datetime.datetime.now()),
+        "model_type": "autoencoder"
+    }
+    
+    with open(metadata_path, 'w') as f:
+        json.dump(metadata, f, indent=4)
+    
+    logger.info(f"Saved model metadata to {metadata_path}")
+
+
+def setup_device() -> torch.device:
+    """
+    Set up device for model training (CPU or CUDA)
     
     Returns:
-        torch.device: Device to use for training
+        torch.device: Selected device
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    if device.type == "cuda":
-        logger.info(f"Using CUDA device: {torch.cuda.get_device_name(0)}")
-        # Print CUDA memory stats if available
-        logger.info(f"CUDA memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
-        logger.info(f"CUDA memory reserved: {torch.cuda.memory_reserved(0) / 1024**2:.2f} MB")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        gpu_name = torch.cuda.get_device_name(0)
+        logger.info(f"Using GPU: {gpu_name}")
     else:
+        device = torch.device("cpu")
         logger.info("CUDA not available, using CPU")
     
     return device
 
+
 def main():
     """
-    Main function to load data, build model, train, and save results
+    Main entry point for training autoencoder
     """
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description="Train autoencoder for health data anomaly detection")
-    
-    parser.add_argument("--latent-dim", type=int, default=16,
-                        help="Dimension of latent space (default: 16)")
-    parser.add_argument("--epochs", type=int, default=50,
-                        help="Number of training epochs (default: 50)")
-    parser.add_argument("--batch-size", type=int, default=64,
-                        help="Batch size for training (default: 64)")
-    parser.add_argument("--learning-rate", type=float, default=0.001,
-                        help="Learning rate (default: 0.001)")
-    parser.add_argument("--dropout", type=float, default=0.2,
-                        help="Dropout rate (default: 0.2)")
-    parser.add_argument("--train-ratio", type=float, default=0.8,
-                        help="Ratio of data to use for training (default: 0.8)")
-    parser.add_argument("--save-latents", action="store_true",
-                        help="Save latent vectors and errors")
-    parser.add_argument("--use-sigmoid", action="store_true",
-                        help="Use sigmoid activation on output")
-    parser.add_argument("--timestamp", action="store_true",
-                        help="Add timestamp to saved files")
-    parser.add_argument("--save-interval", type=int, default=0,
-                        help="Save model checkpoint every N epochs (default: 0, disabled)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducibility (default: 42)")
-    parser.add_argument("--data-path", type=str, default=None,
-                        help="Path to input data file (default: auto-detect)")
-    
+    parser = argparse.ArgumentParser(description="Train autoencoder for anomaly detection")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size for training")
+    parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
+    parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
+    parser.add_argument("--latent-dim", type=int, default=16, help="Latent space dimension")
+    parser.add_argument("--dropout", type=float, default=0.2, help="Dropout rate")
+    parser.add_argument("--val-split", type=float, default=0.2, help="Validation split ratio")
+    parser.add_argument("--save-interval", type=int, default=10, help="Save model every N epochs (0 to disable)")
+    parser.add_argument("--normalize", action="store_true", help="Normalize input features")
+    parser.add_argument("--use-sigmoid", action="store_true", help="Use sigmoid activation on output")
+    parser.add_argument("--timestamp", action="store_true", help="Add timestamp to saved files")
     args = parser.parse_args()
     
-    # Set random seed for reproducibility
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-    
-    # Set device
+    # Setup device (CPU or CUDA)
     device = setup_device()
     
-    # Use Path for file path handling
-    script_dir = Path(__file__).parent
-    project_root = script_dir.parent.parent
+    # Load data using DataLoader
+    logger.info("Loading data...")
+    data_loader = DataLoader()
+    X = data_loader.load_data(supervised=False, normalize=args.normalize)
     
-    # Define paths
-    if args.data_path:
-        data_path = Path(args.data_path)
-    else:
-        # Try several possible data paths
-        possible_data_paths = [
-            script_dir.parent / "data" / "processed" / "features" / "X_train.npy",
-            project_root / "data" / "processed" / "features" / "X_train.npy",
-            project_root / "ai_module" / "data" / "processed" / "features" / "X_train.npy"
-        ]
-        
-        data_path = None
-        for path in possible_data_paths:
-            if path.exists():
-                data_path = path
-                break
-        
-        if data_path is None:
-            logger.error("Could not find input data file. Please specify with --data-path")
-            sys.exit(1)
+    if X is None or len(X) == 0:
+        logger.error("Failed to load data or empty dataset")
+        return
     
-    # Define output directories with pathlib
-    latent_dir = script_dir.parent / "data" / "processed" / "latents"
-    model_dir = script_dir.parent / "models"
+    logger.info(f"Loaded data with shape: {X.shape}")
     
-    # Create directories if they don't exist
-    for directory in [latent_dir, model_dir]:
-        directory.mkdir(parents=True, exist_ok=True)
-    
-    # Load input data
-    logger.info(f"Loading data from {data_path}")
-    
-    try:
-        X = np.load(data_path)
-        logger.info(f"Loaded data with shape {X.shape}")
-    except Exception as e:
-        logger.error(f"Error loading data: {e}")
-        sys.exit(1)
-    
-    # Convert to PyTorch tensor and create dataset
-    X_tensor = torch.tensor(X, dtype=torch.float32)
+    # Convert to tensors
+    X_tensor = torch.FloatTensor(X)
     dataset = TensorDataset(X_tensor)
     
-    # Split into train and validation sets
-    train_size = int(args.train_ratio * len(dataset))
-    val_size = len(dataset) - train_size
-    
-    train_dataset, val_dataset = random_split(
-        dataset, 
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(args.seed)
-    )
-    
-    logger.info(f"Dataset split: {train_size} training samples, {val_size} validation samples")
+    # Split into train/validation sets
+    val_size = int(len(dataset) * args.val_split)
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
     
     # Create data loaders
-    train_loader = DataLoader(
+    train_loader = TorchDataLoader(
         train_dataset, 
         batch_size=args.batch_size, 
-        shuffle=True,
-        pin_memory=torch.cuda.is_available()
+        shuffle=True, 
+        num_workers=2,
+        pin_memory=True if device.type == "cuda" else False
     )
     
-    val_loader = DataLoader(
+    val_loader = TorchDataLoader(
         val_dataset, 
-        batch_size=args.batch_size,
-        shuffle=False,
-        pin_memory=torch.cuda.is_available()
-    )
-    
-    # For encoding all data
-    full_loader = DataLoader(
-        dataset, 
-        batch_size=args.batch_size,
-        shuffle=False,
-        pin_memory=torch.cuda.is_available()
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=2,
+        pin_memory=True if device.type == "cuda" else False
     )
     
     # Build model
     input_dim = X.shape[1]
     model = build_autoencoder(
-        input_dim=input_dim,
-        latent_dim=args.latent_dim,
+        input_dim=input_dim, 
+        latent_dim=args.latent_dim, 
         dropout=args.dropout,
         use_sigmoid=args.use_sigmoid
     )
-    
-    logger.info(f"Created autoencoder model with:")
-    logger.info(f"  Input dimension: {input_dim}")
-    logger.info(f"  Latent dimension: {args.latent_dim}")
-    logger.info(f"  Total parameters: {sum(p.numel() for p in model.parameters())}")
+    logger.info(f"Created autoencoder with input_dim={input_dim}, latent_dim={args.latent_dim}")
     
     # Train model
-    model_path = model_dir / "autoencoder.pt"
-    logger.info(f"Training model for {args.epochs} epochs (batch size: {args.batch_size})")
-    
+    logger.info(f"Starting training for {args.epochs} epochs...")
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    model_path = MODELS_DIR / "autoencoder.pt"
     model, losses = train_model(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
         epochs=args.epochs,
-        lr=args.learning_rate,
+        lr=args.lr,
         device=device,
         save_interval=args.save_interval,
         model_path=model_path
     )
     
-    # Save latent vectors and errors
-    if args.save_latents:
-        logger.info("Extracting and saving latent vectors")
-        save_latents(
-            model=model,
-            dataloader=full_loader,
-            device=device,
-            latent_dir=latent_dir,
-            save_errors=True,
-            timestamp=args.timestamp
-        )
+    # Save model metadata
+    metadata_path = MODELS_DIR / "autoencoder_model_meta.json"
+    save_model_metadata(model, metadata_path)
+    
+    # Generate and save latent vectors
+    logger.info("Generating latent vectors...")
+    LATENTS_DIR.mkdir(parents=True, exist_ok=True)
+    full_loader = TorchDataLoader(
+        dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=2,
+        pin_memory=True if device.type == "cuda" else False
+    )
+    latent_vectors, reconstruction_errors = save_latents(
+        model=model,
+        dataloader=full_loader,
+        device=device,
+        latent_dir=LATENTS_DIR,
+        save_errors=True,
+        timestamp=args.timestamp
+    )
     
     logger.info("Training completed successfully")
 
+
 if __name__ == "__main__":
+    import datetime
     main()

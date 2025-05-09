@@ -24,3 +24,9 @@ ai_module/models/
 ai_module/data/processed/
 ai_module/reports/
 ai_module/plots/
+
+# Ignore all files in the data directory
+data/*
+
+# Ignore all files in the data directory
+data/*
