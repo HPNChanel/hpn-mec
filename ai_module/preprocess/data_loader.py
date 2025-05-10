@@ -447,7 +447,10 @@ class DataNormalizer:
         # Create a copy to avoid modifying the original
         df = df.copy()
         
-        # Fill missing values for each column
+        # Track columns that will be dropped
+        columns_to_drop = []
+        
+        # Identify columns to drop first
         for col in df.columns:
             if col == 'source':
                 continue
@@ -456,10 +459,20 @@ class DataNormalizer:
             non_null = df[col].dropna()
             
             if len(non_null) == 0:
-                # If all values are missing, drop the column
-                df = df.drop(columns=[col])
+                # If all values are missing, mark column for dropping
+                columns_to_drop.append(col)
                 logger.warning(f"Dropped column '{col}' as all values were missing")
-            elif pd.api.types.is_numeric_dtype(df[col]):
+        
+        # Drop identified columns
+        if columns_to_drop:
+            df = df.drop(columns=columns_to_drop)
+            
+        # Now fill missing values for remaining columns
+        for col in df.columns:
+            if col == 'source':
+                continue
+                
+            if pd.api.types.is_numeric_dtype(df[col]):
                 # For numeric columns, fill with median
                 df.loc[:, col] = df[col].fillna(df[col].median())
             else:

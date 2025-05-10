@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Import from project modules
 from ai_module.models.autoencoder import AutoEncoder
-from ai_module.data_loader import DataLoader
+
 
 # Default paths
 MODELS_DIR = Path(__file__).parent.parent / "models"

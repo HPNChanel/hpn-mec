@@ -18,7 +18,6 @@ logging.basicConfig(
 )
 
 # Import key components to make them available directly from the module
-from ai_module.data_loader import DataLoader
-from ai_module.models import AutoEncoder
+
 
 __all__ = ['DataLoader', 'AutoEncoder']
