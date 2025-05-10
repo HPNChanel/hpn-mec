@@ -3,7 +3,7 @@
 """
 Data Loading Module for HPN Medicare AI Module
 
-This module provides a DataLoader class to load, preprocess, and unify
+This module provides modular components for loading, preprocessing, and unifying
 health data from multiple CSV sources into a standardized format for ML models.
 
 Author: Huỳnh Phúc Nguyên
@@ -89,53 +89,23 @@ TARGET_COLUMNS = {
 }
 
 
-class DataLoader:
+class CSVLoader:
     """
-    A class to load and preprocess health data from multiple CSV sources.
+    Class to handle loading CSV files from various sources.
     
-    This class handles loading CSVs from multiple directories, standardizing
-    column names, cleaning features, unifying target labels, and saving
-    processed data to designated output directories.
+    Handles file discovery, delimiter detection, and initial loading.
     """
     
-    def __init__(
-        self,
-        raw_data_dir: str = "data/raw",
-        processed_dir: str = "data/processed",
-        column_mapping: Optional[Dict[str, str]] = None,
-        important_features: Optional[List[str]] = None
-    ):
+    def __init__(self, raw_data_dir: str = "data/raw"):
         """
-        Initialize the DataLoader with configuration parameters.
+        Initialize the CSV Loader with configuration parameters.
         
         Args:
             raw_data_dir: Directory containing raw CSV files (default: "data/raw")
-            processed_dir: Directory to save processed data (default: "data/processed")
-            column_mapping: Custom column name mapping (default: None, uses built-in mapping)
-            important_features: List of important features to keep (default: None, uses built-in list)
         """
         # Convert string paths to Path objects
         self.raw_data_dir = Path(raw_data_dir)
-        self.processed_dir = Path(processed_dir)
-        
-        # Create output directories if they don't exist
-        self.features_dir = self.processed_dir / "features"
-        self.labels_dir = self.processed_dir / "labels"
-        self.combined_dir = self.processed_dir / "combined"
-        self.latents_dir = self.processed_dir / "latents"
-        self.scores_dir = self.processed_dir / "scores"
-        
-        for directory in [self.features_dir, self.labels_dir, self.combined_dir, 
-                          self.latents_dir, self.scores_dir]:
-            directory.mkdir(parents=True, exist_ok=True)
-        
-        # Use custom column mapping if provided, otherwise use default
-        self.column_mapping = column_mapping if column_mapping else COLUMN_MAPPING
-        
-        # Use custom important features if provided, otherwise use default
-        self.important_features = important_features if important_features else IMPORTANT_FEATURES
-        
-        logger.info(f"Initialized DataLoader with raw data directory: {self.raw_data_dir}")
+        logger.info(f"Initialized CSVLoader with data directory: {self.raw_data_dir}")
     
     def find_csv_files(self) -> List[Path]:
         """
@@ -211,6 +181,62 @@ class DataLoader:
             logger.error(f"Error loading {file_path}: {e}")
             return None
     
+    def load_all_csvs(self) -> pd.DataFrame:
+        """
+        Load all CSV files from the raw data directory into a single DataFrame.
+        
+        Returns:
+            Combined DataFrame with all CSV data
+        """
+        csv_files = self.find_csv_files()
+        
+        if not csv_files:
+            raise FileNotFoundError(f"No CSV files found in {self.raw_data_dir}")
+            
+        # Load each CSV and collect in a list
+        dataframes = []
+        for file_path in csv_files:
+            df = self.load_single_csv(file_path)
+            if df is not None and not df.empty:
+                dataframes.append(df)
+        
+        if not dataframes:
+            raise ValueError("No valid data loaded from CSV files")
+        
+        # Combine all dataframes into one
+        combined_df = pd.concat(dataframes, ignore_index=True, sort=False)
+        logger.info(f"Combined {len(dataframes)} CSV files into single DataFrame with {len(combined_df)} rows")
+        
+        return combined_df
+
+
+class FeatureProcessor:
+    """
+    Class to handle feature processing, standardization, and cleaning.
+    
+    Standardizes column names, cleans features, and filters important features.
+    """
+    
+    def __init__(
+        self,
+        column_mapping: Optional[Dict[str, str]] = None,
+        important_features: Optional[List[str]] = None
+    ):
+        """
+        Initialize the FeatureProcessor.
+        
+        Args:
+            column_mapping: Custom column name mapping (default: None, uses built-in mapping)
+            important_features: List of important features to keep (default: None, uses built-in list)
+        """
+        # Use custom column mapping if provided, otherwise use default
+        self.column_mapping = column_mapping if column_mapping else COLUMN_MAPPING
+        
+        # Use custom important features if provided, otherwise use default
+        self.important_features = important_features if important_features else IMPORTANT_FEATURES
+        
+        logger.info(f"Initialized FeatureProcessor with {len(self.column_mapping)} column mappings")
+    
     def standardize_column_names(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         Standardize column names using the column mapping.
@@ -224,7 +250,7 @@ class DataLoader:
         # Convert all column names to lowercase
         df.columns = [col.lower() for col in df.columns]
         
-        # Create rename mapping based on COLUMN_MAPPING
+        # Create rename mapping based on column_mapping
         rename_dict = {}
         for old_name in df.columns:
             if old_name in self.column_mapping:
@@ -243,175 +269,251 @@ class DataLoader:
         
         This includes:
         - Converting age from days to years (if needed)
-        - Normalizing numerical columns
-        - Filling missing values
         - Handling categorical variables
+        - Initial data cleaning
         
         Args:
-            df: DataFrame with loaded data
+            df: DataFrame with features to clean
             
         Returns:
             DataFrame with cleaned features
         """
-        # Create a copy to avoid modifying the original
-        df_clean = df.copy()
-        
-        # Step 1: Convert age from days to years if needed
-        if 'age' in df_clean.columns:
-            # Check if age is likely in days (assuming age > 1000 means it's in days)
-            if df_clean['age'].mean() > 1000:
+        try:
+            # Create a copy to avoid modifying the original
+            df = df.copy()
+            
+            # Convert age from days to years if large values detected
+            if 'age' in df.columns and df['age'].max() > 365:
                 logger.info("Converting age from days to years")
-                df_clean['age'] = df_clean['age'] / 365.25
-        
-        # Step 2: Convert gender to binary if needed
-        if 'gender' in df_clean.columns:
-            # Check if 'gender' contains strings or non-binary values
-            if df_clean['gender'].dtype == 'object' or df_clean['gender'].nunique() > 2:
-                logger.info("Converting gender to binary (0=female, 1=male)")
-                # Map strings to binary (1 for male, 0 for female)
-                gender_map = {'m': 1, 'male': 1, 'f': 0, 'female': 0}
-                # Convert case-insensitive
-                if df_clean['gender'].dtype == 'object':
-                    df_clean['gender'] = df_clean['gender'].str.lower().map(gender_map)
-                    # Fill unmapped values with most common
-                    if df_clean['gender'].isna().any():
-                        most_common = df_clean['gender'].mode()[0]
-                        df_clean['gender'] = df_clean['gender'].fillna(most_common)
-        
-        # Step 3: Handle missing values (use median for numerical, mode for categorical)
-        for col in df_clean.columns:
-            if df_clean[col].isna().any():
-                missing_count = df_clean[col].isna().sum()
-                if pd.api.types.is_numeric_dtype(df_clean[col]):
-                    median_val = df_clean[col].median()
-                    df_clean[col] = df_clean[col].fillna(median_val)
-                    logger.info(f"Filled {missing_count} missing values in '{col}' with median: {median_val}")
-                else:
-                    mode_val = df_clean[col].mode()[0]
-                    df_clean[col] = df_clean[col].fillna(mode_val)
-                    logger.info(f"Filled {missing_count} missing values in '{col}' with mode: {mode_val}")
-        
-        # Step 4: Check for and convert categorical columns to appropriate format
-        for col in df_clean.columns:
-            if col in IMPORTANT_FEATURES and not pd.api.types.is_numeric_dtype(df_clean[col]):
-                logger.info(f"Converting non-numeric column '{col}' to numeric")
-                try:
-                    # Try to convert to numeric, setting errors to 'coerce' will turn
-                    # non-convertable values to NaN
-                    df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
-                    # Fill new NaN values with median
-                    if df_clean[col].isna().any():
-                        median_val = df_clean[col].median()
-                        df_clean[col] = df_clean[col].fillna(median_val)
-                except Exception as e:
-                    logger.warning(f"Could not convert '{col}' to numeric: {e}")
-        
-        return df_clean
-    
-    def normalize_numerical_features(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, MinMaxScaler]]:
-        """
-        Normalize numerical features using MinMaxScaler.
-        
-        Args:
-            df: DataFrame with cleaned features
+                df.loc[:, 'age'] = df['age'] / 365.25
             
-        Returns:
-            Tuple of (DataFrame with normalized features, Dict of scalers)
-        """
-        df_norm = df.copy()
-        scalers = {}
-        
-        # Identify numerical columns
-        numerical_cols = [col for col in df_norm.columns 
-                          if pd.api.types.is_numeric_dtype(df_norm[col]) 
-                          and col not in TARGET_COLUMNS.keys()
-                          and col != 'source']
-        
-        logger.info(f"Normalizing {len(numerical_cols)} numerical features")
-        
-        # Normalize each numerical column separately
-        for col in numerical_cols:
-            if df_norm[col].nunique() > 1:  # Only normalize if more than one unique value
-                scaler = MinMaxScaler()
-                # Reshape to 2D array for scaler
-                values = df_norm[col].values.reshape(-1, 1)
-                df_norm[col] = scaler.fit_transform(values).flatten()
-                scalers[col] = scaler
-        
-        return df_norm, scalers
-    
-    def unify_labels(self, df: pd.DataFrame, supervised: bool = True) -> Tuple[pd.DataFrame, Optional[np.ndarray]]:
-        """
-        Unify target labels from different sources into a single 'label' column.
-        
-        Args:
-            df: DataFrame with processed features
-            supervised: Whether to extract labels (True) or ignore them (False)
+            # Handle gender/sex encoding
+            if 'gender' in df.columns:
+                # Convert text values to binary
+                if df['gender'].dtype == 'object':
+                    gender_map = {
+                        'f': 0, 'female': 0, 'woman': 0, 'm': 1, 'male': 1, 'man': 1
+                    }
+                    df.loc[:, 'gender'] = df['gender'].str.lower().map(gender_map).fillna(df['gender'])
+                
+                # Ensure integer encoding
+                df.loc[:, 'gender'] = df['gender'].astype(float).astype('Int64')
             
-        Returns:
-            Tuple of (DataFrame with features only, Optional array of labels)
-        """
-        if not supervised:
-            logger.info("Supervised learning disabled, not extracting labels")
-            return df, None
-        
-        # Create a copy to avoid modifying the original
-        df_features = df.copy()
-        
-        # Check for any target columns in the DataFrame
-        target_columns = [col for col in TARGET_COLUMNS.keys() if col in df_features.columns]
-        
-        if not target_columns:
-            logger.warning("No known target columns found for supervised learning")
-            return df_features, None
-        
-        logger.info(f"Found target columns: {target_columns}")
-        
-        # Handle diabetes risk (convert values > 0 to 1)
-        if 'diabetes_risk' in target_columns:
-            logger.info("Converting diabetes_risk to binary (1 if > 0 else 0)")
-            df_features['diabetes_risk'] = df_features['diabetes_risk'].apply(lambda x: 1 if x > 0 else 0)
-        
-        # Create unified label column (use first available target column)
-        primary_target = target_columns[0]
-        df_features['label'] = df_features[primary_target]
-        
-        # Extract labels and remove target columns from features
-        labels = df_features['label'].values
-        
-        # Remove all target columns and the unified label from features
-        columns_to_drop = target_columns + ['label']
-        df_features = df_features.drop(columns=columns_to_drop)
-        
-        logger.info(f"Extracted labels from '{primary_target}', removed {len(columns_to_drop)} columns from features")
-        
-        return df_features, labels
+            # Convert categorical variables to numeric where needed
+            for col in df.columns:
+                if df[col].dtype == 'object' and col not in ['source']:
+                    try:
+                        # Try to convert to numeric
+                        df.loc[:, col] = pd.to_numeric(df[col], errors='coerce')
+                    except:
+                        pass
+            
+            logger.info(f"Cleaned features in DataFrame with {len(df)} rows")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error cleaning features: {e}")
+            return df
     
     def filter_important_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Filter DataFrame to keep only important features (if present).
+        Filter DataFrame to keep only important features.
         
         Args:
-            df: DataFrame with processed features
+            df: DataFrame with all features
             
         Returns:
-            DataFrame with only important features and metadata
+            DataFrame with only important features
         """
-        # Always keep 'source' column
-        columns_to_keep = ['source']
+        # Get list of available important features in this dataset
+        available_features = [f for f in self.important_features if f in df.columns]
         
-        # Add important features that are present in the DataFrame
-        for feature in self.important_features:
-            if feature in df.columns:
-                columns_to_keep.append(feature)
+        if not available_features:
+            logger.warning("No important features found in dataset. Keeping all features.")
+            return df
         
-        # Filter columns
-        df_filtered = df[columns_to_keep]
+        # Always keep the source column
+        if 'source' in df.columns and 'source' not in available_features:
+            available_features.append('source')
         
-        features_kept = len(columns_to_keep) - 1  # Subtract 1 for 'source'
-        logger.info(f"Kept {features_kept}/{len(self.important_features)} important features")
+        # Filter DataFrame
+        filtered_df = df[available_features].copy()
         
-        return df_filtered
+        logger.info(f"Filtered features from {len(df.columns)} to {len(filtered_df.columns)} columns")
+        return filtered_df
+    
+    def unify_labels(self, df: pd.DataFrame, supervised: bool = True) -> Tuple[pd.DataFrame, Optional[np.ndarray]]:
+        """
+        Extract and unify target labels from DataFrame.
+        
+        Args:
+            df: DataFrame with features and potential target columns
+            supervised: Whether to extract labels for supervised learning
+            
+        Returns:
+            Tuple of (features_df, labels_array)
+        """
+        if not supervised:
+            return df, None
+        
+        # Look for target columns
+        target_columns = [col for col in df.columns if col in TARGET_COLUMNS.keys()]
+        
+        if not target_columns:
+            logger.warning("No target columns found for supervised learning")
+            return df, None
+        
+        # Use the first found target column
+        target_col = target_columns[0]
+        logger.info(f"Using '{target_col}' as target for supervised learning")
+        
+        # Extract labels
+        labels = df[target_col].values
+        
+        # Remove all target columns from features
+        for col in target_columns:
+            if col in df.columns:
+                df = df.drop(columns=[col])
+        
+        return df, labels
+
+
+class DataNormalizer:
+    """
+    Class to handle data normalization and preprocessing for machine learning.
+    
+    Normalizes numerical features and handles missing values.
+    """
+    
+    def __init__(self):
+        """Initialize the DataNormalizer."""
+        logger.info("Initialized DataNormalizer")
+    
+    def normalize_numerical_features(self, df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, MinMaxScaler]]:
+        """
+        Normalize numerical features using Min-Max scaling.
+        
+        Args:
+            df: DataFrame with features
+            
+        Returns:
+            Tuple of (normalized_df, scaler_dict)
+        """
+        # Create a copy to avoid modifying the original
+        df = df.copy()
+        
+        # Identify numerical columns (excluding 'source')
+        numerical_cols = [
+            col for col in df.columns 
+            if col != 'source' and pd.api.types.is_numeric_dtype(df[col])
+        ]
+        
+        if not numerical_cols:
+            logger.warning("No numerical columns found for normalization")
+            return df, {}
+        
+        # Initialize scalers dictionary
+        scalers = {}
+        
+        # Normalize each numerical column separately
+        for col in numerical_cols:
+            # Handle missing values
+            df[col] = df[col].fillna(df[col].median())
+            
+            # Create and fit scaler
+            scaler = MinMaxScaler(feature_range=(0, 1))
+            # Reshape for scaler
+            values = df[col].values.reshape(-1, 1)
+            # Fit and transform
+            normalized_values = scaler.fit_transform(values).flatten()
+            # Update column values
+            df.loc[:, col] = normalized_values
+            # Store scaler
+            scalers[col] = scaler
+        
+        logger.info(f"Normalized {len(numerical_cols)} numerical features")
+        return df, scalers
+    
+    def handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Handle missing values in the DataFrame.
+        
+        Args:
+            df: DataFrame with potential missing values
+            
+        Returns:
+            DataFrame with missing values handled
+        """
+        # Create a copy to avoid modifying the original
+        df = df.copy()
+        
+        # Fill missing values for each column
+        for col in df.columns:
+            if col == 'source':
+                continue
+                
+            # Get non-null values
+            non_null = df[col].dropna()
+            
+            if len(non_null) == 0:
+                # If all values are missing, drop the column
+                df = df.drop(columns=[col])
+                logger.warning(f"Dropped column '{col}' as all values were missing")
+            elif pd.api.types.is_numeric_dtype(df[col]):
+                # For numeric columns, fill with median
+                df.loc[:, col] = df[col].fillna(df[col].median())
+            else:
+                # For non-numeric columns, fill with mode
+                df.loc[:, col] = df[col].fillna(df[col].mode()[0] if not df[col].mode().empty else np.nan)
+        
+        logger.info(f"Handled missing values in DataFrame with {len(df)} rows")
+        return df
+
+
+class DataLoader:
+    """
+    Coordinator class that integrates CSV loading, feature processing, and normalization.
+    
+    This class orchestrates the entire data loading and preprocessing pipeline.
+    """
+    
+    def __init__(
+        self,
+        raw_data_dir: str = "data/raw",
+        processed_dir: str = "data/processed",
+        column_mapping: Optional[Dict[str, str]] = None,
+        important_features: Optional[List[str]] = None
+    ):
+        """
+        Initialize the DataLoader with configuration parameters.
+        
+        Args:
+            raw_data_dir: Directory containing raw CSV files (default: "data/raw")
+            processed_dir: Directory to save processed data (default: "data/processed")
+            column_mapping: Custom column name mapping (default: None, uses built-in mapping)
+            important_features: List of important features to keep (default: None, uses built-in list)
+        """
+        # Convert string paths to Path objects
+        self.raw_data_dir = Path(raw_data_dir)
+        self.processed_dir = Path(processed_dir)
+        
+        # Create output directories if they don't exist
+        self.features_dir = self.processed_dir / "features"
+        self.labels_dir = self.processed_dir / "labels"
+        self.combined_dir = self.processed_dir / "combined"
+        self.latents_dir = self.processed_dir / "latents"
+        self.scores_dir = self.processed_dir / "scores"
+        
+        for directory in [self.features_dir, self.labels_dir, self.combined_dir, 
+                          self.latents_dir, self.scores_dir]:
+            directory.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize component classes
+        self.csv_loader = CSVLoader(raw_data_dir)
+        self.feature_processor = FeatureProcessor(column_mapping, important_features)
+        self.normalizer = DataNormalizer()
+        
+        logger.info(f"Initialized DataLoader with raw data directory: {self.raw_data_dir}")
     
     def save_data(
         self, 
@@ -421,69 +523,72 @@ class DataLoader:
         timestamp: bool = False
     ) -> Dict[str, Path]:
         """
-        Save processed data to output directories.
+        Save processed features and labels to designated directories.
         
         Args:
-            X: Feature matrix
-            y: Labels (if available)
-            feature_names: List of feature names (if available)
-            timestamp: Whether to include timestamp in filenames
+            X: Feature array
+            y: Labels array (optional)
+            feature_names: List of feature names (optional)
+            timestamp: Whether to add timestamp to filenames
             
         Returns:
-            Dictionary with paths to saved files
+            Dictionary of saved file paths
         """
-        # Generate timestamp suffix if requested
-        suffix = ""
-        if timestamp:
-            suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Generate timestamp if requested
+        ts = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if timestamp else ""
         
-        # Save feature matrix
-        X_path = self.features_dir / f"X_train{suffix}.npy"
-        np.save(X_path, X)
-        logger.info(f"Saved feature matrix with shape {X.shape} to {X_path}")
+        # Prepare paths
+        features_path = self.features_dir / f"X{ts}.npy"
+        feature_names_path = self.features_dir / f"feature_names{ts}.txt"
         
-        saved_paths = {'X': X_path}
+        # Save features
+        np.save(features_path, X)
+        logger.info(f"Saved features to {features_path}")
         
-        # Save feature names if available
+        # Save feature names if provided
         if feature_names:
-            feature_names_path = self.features_dir / f"feature_names{suffix}.txt"
             with open(feature_names_path, 'w') as f:
-                f.write('\n'.join(feature_names))
+                for name in feature_names:
+                    f.write(f"{name}\n")
             logger.info(f"Saved feature names to {feature_names_path}")
-            saved_paths['feature_names'] = feature_names_path
         
-        # Save labels if available
+        # Prepare result dict
+        result = {
+            "features": features_path,
+            "feature_names": feature_names_path if feature_names else None
+        }
+        
+        # Save labels if provided
         if y is not None:
-            y_path = self.labels_dir / f"y_train{suffix}.npy"
-            np.save(y_path, y)
-            logger.info(f"Saved labels with shape {y.shape} to {y_path}")
-            saved_paths['y'] = y_path
+            labels_path = self.labels_dir / f"y{ts}.npy"
+            np.save(labels_path, y)
+            logger.info(f"Saved labels to {labels_path}")
+            result["labels"] = labels_path
         
-        return saved_paths
+        return result
     
     def save_combined_dataset(self, df: pd.DataFrame, timestamp: bool = False) -> Path:
         """
-        Save combined dataset to CSV.
+        Save the complete processed DataFrame for future reference.
         
         Args:
-            df: DataFrame with processed data
-            timestamp: Whether to include timestamp in filename
+            df: Processed DataFrame
+            timestamp: Whether to add timestamp to filename
             
         Returns:
-            Path to saved CSV file
+            Path to saved file
         """
-        # Generate timestamp suffix if requested
-        suffix = ""
-        if timestamp:
-            suffix = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        # Generate timestamp if requested
+        ts = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if timestamp else ""
         
-        # Save to CSV
-        output_path = self.combined_dir / f"final_dataset{suffix}.csv"
-        df.to_csv(output_path, index=False)
+        # Prepare path
+        combined_path = self.combined_dir / f"combined_data{ts}.csv"
         
-        logger.info(f"Saved combined dataset with {len(df)} rows to {output_path}")
+        # Save as CSV
+        df.to_csv(combined_path, index=False)
+        logger.info(f"Saved combined dataset to {combined_path}")
         
-        return output_path
+        return combined_path
     
     def load_data(
         self, 
@@ -494,109 +599,73 @@ class DataLoader:
         timestamp: bool = False
     ) -> Union[Tuple[np.ndarray, np.ndarray], np.ndarray]:
         """
-        Main method to load, process, and return the data.
+        Execute the full data loading and preprocessing pipeline.
         
         Args:
-            supervised: Whether to extract labels (True) or not (False)
+            supervised: Whether to extract labels for supervised learning
             normalize: Whether to normalize numerical features
             filter_features: Whether to filter to keep only important features
-            save_files: Whether to save processed data to disk
-            timestamp: Whether to include timestamp in saved filenames
+            save_files: Whether to save processed files
+            timestamp: Whether to add timestamp to filenames
             
         Returns:
-            If supervised=True: Tuple of (feature matrix, labels)
-            If supervised=False: Feature matrix only
+            For supervised=True: Tuple of (features, labels)
+            For supervised=False: Features array only
         """
-        # Step 1: Find all CSV files
-        csv_files = self.find_csv_files()
-        if not csv_files:
-            logger.error("No CSV files found. Cannot proceed.")
-            return (np.array([]), np.array([])) if supervised else np.array([])
-        
-        # Step 2: Load all CSV files
-        dataframes = []
-        for file_path in csv_files:
-            df = self.load_single_csv(file_path)
-            if df is not None:
-                dataframes.append(df)
-        
-        if not dataframes:
-            logger.error("No CSV files could be loaded successfully.")
-            return (np.array([]), np.array([])) if supervised else np.array([])
-        
-        logger.info(f"Successfully loaded {len(dataframes)} CSV files")
-        
-        # Step 3: Process each DataFrame
-        processed_dfs = []
-        for i, df in enumerate(dataframes):
-            logger.info(f"Processing DataFrame {i+1}/{len(dataframes)} (source: {df['source'].iloc[0]})")
+        try:
+            # Load all CSVs
+            df = self.csv_loader.load_all_csvs()
             
             # Standardize column names
-            df = self.standardize_column_names(df)
+            df = self.feature_processor.standardize_column_names(df)
             
             # Clean features
-            df = self.clean_features(df)
+            df = self.feature_processor.clean_features(df)
             
-            processed_dfs.append(df)
-        
-        # Step 4: Combine all processed DataFrames
-        df_combined = pd.concat(processed_dfs, ignore_index=True)
-        logger.info(f"Combined {len(processed_dfs)} DataFrames into one with {len(df_combined)} rows")
-        
-        # Step 5: Filter to keep only important features if requested
-        if filter_features:
-            df_combined = self.filter_important_features(df_combined)
-        
-        # Step 6: Normalize numerical features if requested
-        if normalize:
-            df_combined, scalers = self.normalize_numerical_features(df_combined)
-        
-        # Save combined dataset before extracting labels
-        if save_files:
-            self.save_combined_dataset(df_combined, timestamp)
-        
-        # Step 7: Unify and extract labels if supervised
-        if supervised:
-            df_features, labels = self.unify_labels(df_combined, supervised=True)
-            if labels is None:
-                logger.warning("No labels found for supervised learning. Returning unsupervised result.")
-                # Return unsupervised result if no labels found
-                # Drop 'source' column from features
-                if 'source' in df_combined.columns:
-                    df_combined = df_combined.drop(columns=['source'])
+            # Handle missing values
+            df = self.normalizer.handle_missing_values(df)
+            
+            # Filter important features if requested
+            if filter_features:
+                df = self.feature_processor.filter_important_features(df)
+            
+            # Extract labels if supervised
+            df, labels = self.feature_processor.unify_labels(df, supervised)
+            
+            # Normalize numerical features if requested
+            if normalize:
+                df, _ = self.normalizer.normalize_numerical_features(df)
+            
+            # Remove 'source' column if present for final features
+            if 'source' in df.columns:
+                feature_names = [col for col in df.columns if col != 'source']
+                df = df.drop(columns=['source'])
+            else:
+                feature_names = list(df.columns)
+            
+            # Convert to numpy array
+            features = df.values
+            
+            # Save files if requested
+            if save_files:
+                self.save_data(features, labels, feature_names, timestamp)
                 
-                # Convert to numpy array
-                X = df_combined.values
+                # Create a copy to save as combined dataset with labels
+                combined_df = df.copy()
+                if labels is not None:
+                    combined_df['label'] = labels
                 
-                # Save data if requested
-                if save_files:
-                    self.save_data(X, feature_names=df_combined.columns.tolist(), timestamp=timestamp)
-                
-                return X
-        else:
-            df_features = df_combined
-            labels = None
-        
-        # Step 8: Convert to numpy arrays
-        # Keep track of feature names before dropping 'source'
-        feature_names = [col for col in df_features.columns if col != 'source']
-        
-        # Drop 'source' column from features
-        if 'source' in df_features.columns:
-            df_features = df_features.drop(columns=['source'])
-        
-        # Convert to numpy array
-        X = df_features.values
-        
-        # Step 9: Save processed data if requested
-        if save_files:
-            self.save_data(X, labels, feature_names=feature_names, timestamp=timestamp)
-        
-        # Step 10: Return the processed data
-        if supervised and labels is not None:
-            return X, labels
-        else:
-            return X
+                self.save_combined_dataset(combined_df, timestamp)
+            
+            # Return results based on supervised flag
+            if supervised and labels is not None:
+                return features, labels
+            else:
+                return features
+            
+        except Exception as e:
+            logger.error(f"Error in load_data: {e}")
+            raise
 
 
 # CLI interface

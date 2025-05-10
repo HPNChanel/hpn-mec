@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 # Import key components to expose at module level
 try:
-    from ai_module.evaluate.evaluate_autoencoder import evaluate_autoencoder, calculate_reconstruction_error
-    from ai_module.evaluate.evaluate_isolation_forest import evaluate_isolation_forest, calculate_anomaly_scores
+    from ai_module.evaluate.isolation_autoencoder import evaluate_autoencoder, calculate_reconstruction_error
+    from ai_module.evaluate.isolation_evaluator import evaluate_isolation_forest, calculate_anomaly_scores
     
     __all__ = [
         'evaluate_autoencoder', 

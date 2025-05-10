@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Import key components to expose at module level
 try:
-    from ai_module.inference.api_inference_handler import generate_predictions, run_api, API_PORT
+    from ai_module.inference.inference_api import generate_predictions, run_api, API_PORT
     
     __all__ = ['generate_predictions', 'run_api', 'API_PORT']
 except ImportError as e:
